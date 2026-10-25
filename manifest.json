@@ -3,15 +3,11 @@
   "name": "usitc-tariffs-mcp-server",
   "version": "0.1.0",
   "description": "Search USITC tariff schedules, inspect heading trees, and look up published duty rates via MCP. STDIO or Streamable HTTP.",
-  "author": {
-    "name": "cyanheads",
-    "email": "casey@caseyjhand.com",
-    "url": "https://caseyjhand.com"
-  },
-  "homepage": "https://github.com/cyanheads/usitc-tariffs-mcp-server",
+  "author": { "name": "cyanheads" },
+  "homepage": "https://github.com/cyanheads/usitc-tariffs-mcp-server#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cyanheads/usitc-tariffs-mcp-server.git"
+    "url": "https://github.com/cyanheads/usitc-tariffs-mcp-server"
   },
   "license": "Apache-2.0",
   "server": {

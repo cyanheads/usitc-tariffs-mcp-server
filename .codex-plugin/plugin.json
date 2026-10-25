@@ -7,15 +7,15 @@
     "email": "casey@caseyjhand.com",
     "url": "https://github.com/cyanheads"
   },
-  "homepage": "https://github.com/cyanheads/usitc-tariffs-mcp-server",
+  "homepage": "https://github.com/cyanheads/usitc-tariffs-mcp-server#readme",
   "repository": "https://github.com/cyanheads/usitc-tariffs-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "cyanheads", "usitc", "htsus", "tariffs", "customs", "trade"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "bun", "stdio", "streamable-http", "cyanheads", "usitc", "htsus", "tariffs", "customs", "trade"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "usitc-tariffs-mcp-server",
     "shortDescription": "Search USITC tariff schedules, inspect heading trees, and look up published duty rates via MCP. STDIO or Streamable HTTP.",
-    "longDescription": "Find U.S. Harmonized Tariff Schedule codes from product descriptions, inspect the indented classification hierarchy, and read the published General, Special, and Column 2 duty rates. Resolve Special Program Indicators by country of origin and inspect Chapter 99 candidate headings with their source notes. Results describe the published schedule; they do not determine current legal applicability or calculate a combined duty.",
+    "longDescription": "Search the U.S. Harmonized Tariff Schedule by commodity description or code prefix, inspect legal ancestry, and retrieve the published General, Special, and Column 2 duty columns. Decode edition-pinned Special Program Indicators while keeping country membership and qualification unresolved. Investigate partial Chapter 99 candidate evidence with complete supporting passages and source provenance; empty candidates never establish clearance. Results do not determine current legal enforceability, select a duty column, or calculate combined duties.",
     "developerName": "cyanheads",
     "category": "research",
     "capabilities": ["Read"],
