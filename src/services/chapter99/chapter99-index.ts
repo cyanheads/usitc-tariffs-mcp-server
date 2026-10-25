@@ -165,6 +165,7 @@ function key(passage: Pick<NotePassage, 'subchapter' | 'noteNumber' | 'subdivisi
 /** Parse decoded source HTML. Missing chapter/note structure is an explicit failure. */
 export function buildChapter99Index(html: string, source: Chapter99Source): Chapter99Index {
   const document = parseFragment(html);
+  const sourceId = digest(source.sourceDigest).slice(0, 12);
   const passages: NotePassage[] = [];
   let subchapter: string | undefined;
   let noteNumber: string | undefined;
@@ -186,7 +187,7 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
       ...(noteNumber && { noteNumber }),
       ...(subdivision && { subdivision }),
     };
-    const noteId = `${source.release}:${digest(source.sourceDigest).slice(0, 12)}:${recognized ? key(location) : `${subchapter ?? 'chapter'}:ambiguous`}:${ordinal}:${digest(text).slice(0, 16)}`;
+    const noteId = `${source.release}:${sourceId}:${recognized ? key(location) : `${subchapter ?? 'chapter'}:ambiguous`}:${ordinal}:${digest(text).slice(0, 16)}`;
     passages.push({
       ...location,
       noteId,
