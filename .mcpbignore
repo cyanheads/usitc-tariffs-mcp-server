@@ -1,5 +1,10 @@
 .env*
 .mcpregistry_*
+AGENTS.md
+CLAUDE.md
+/.dockerignore
+/.gitattributes
+/devcheck.config.json
 /.claude/
 /.agents/
 /framework-skills/
