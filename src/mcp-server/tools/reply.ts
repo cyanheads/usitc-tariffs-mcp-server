@@ -5,7 +5,8 @@
 /** Quote source strings as JSON; a longer fence cannot be closed by source backticks. */
 export function formatSourceData(result: unknown): Array<{ type: 'text'; text: string }> {
   const json = JSON.stringify(result, null, 2);
-  const longest = Math.max(2, ...(json.match(/`+/g) ?? []).map((run) => run.length));
+  let longest = 2;
+  for (const match of json.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
   const fence = '`'.repeat(longest + 1);
   const links = new Set<string>();
   const visit = (value: unknown): void => {
