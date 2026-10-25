@@ -1,0 +1,25 @@
+{
+  "name": "usitc-tariffs-mcp-server",
+  "version": "0.1.0",
+  "description": "Search USITC tariff schedules, inspect heading trees, and look up published duty rates via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/usitc-tariffs-mcp-server",
+  "repository": "https://github.com/cyanheads/usitc-tariffs-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "cyanheads", "usitc", "htsus", "tariffs", "customs", "trade"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "usitc-tariffs-mcp-server",
+    "shortDescription": "Search USITC tariff schedules, inspect heading trees, and look up published duty rates via MCP. STDIO or Streamable HTTP.",
+    "longDescription": "Find U.S. Harmonized Tariff Schedule codes from product descriptions, inspect the indented classification hierarchy, and read the published General, Special, and Column 2 duty rates. Resolve Special Program Indicators by country of origin and inspect Chapter 99 candidate headings with their source notes. Results describe the published schedule; they do not determine current legal applicability or calculate a combined duty.",
+    "developerName": "cyanheads",
+    "category": "research",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/usitc-tariffs-mcp-server",
+    "defaultPrompt": []
+  }
+}

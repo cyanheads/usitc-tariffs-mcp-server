@@ -1,0 +1,9 @@
+{
+  "usitc-tariffs-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/usitc-tariffs-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}
