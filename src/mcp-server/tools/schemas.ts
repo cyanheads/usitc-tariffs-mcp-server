@@ -28,16 +28,15 @@ export const metadataShape = {
     .describe('Source provenance.'),
   notices: z.array(z.string()).describe('Persistent source and coverage limitations.'),
 };
-/** Positive workload limits accept 500 but process at most 100 complete items per page. */
+/** Positive safe integer requests process at most 100 complete items per page. */
 export const paginationInputShape = {
   limit: z
     .number()
     .int()
     .min(1)
-    .max(500)
     .default(25)
     .describe(
-      'Requested items, 1–500; effective pages contain at most 100 and may be byte limited.',
+      'Requested items as a positive safe integer; effectiveLimit discloses clamping to at most 100, and pages may be byte limited. Keep the same requested limit for continuation.',
     ),
   cursor: z
     .string()

@@ -127,8 +127,8 @@ function normalize(input: AdditionalDutyInput): Arguments {
       reason: 'invalid_selector',
     });
   const limit = input.limit ?? 25;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 500)
-    throw validationError('limit must be an integer from 1 through 500.', {
+  if (!Number.isSafeInteger(limit) || limit < 1)
+    throw validationError('limit must be a positive safe integer.', {
       reason: 'invalid_selector',
     });
   return {

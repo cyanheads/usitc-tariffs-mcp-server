@@ -389,25 +389,26 @@ describe('base tariff tool contracts', () => {
     );
   });
 
-  it.each(['search', 'heading', 'browse'] as const)(
-    'empty %s results retain actionable notices on both surfaces',
-    async (kind) => {
-      rows = [];
-      const response =
-        kind === 'search'
-          ? await drive(runToolContract(tools.search, { query: 'absent' }))
-          : kind === 'heading'
-            ? await drive(runToolContract(tools.heading, { code: '7701' }))
-            : await drive(runToolContract(tools.browse, { chapter: '77' }));
-      assertTwin(response);
-      expect(response.structuredContent).toMatchObject({
-        page: { total: 0, returned: 0 },
-        totalCount: 0,
-        notice: expect.stringContaining('usitc_'),
-      });
-      expect(text(response)).toContain('notice:');
-    },
-  );
+  it.each(
+    (['search', 'heading', 'browse'] as const).flatMap((kind) =>
+      [501, 100_000].map((limit) => ({ kind, limit })),
+    ),
+  )('empty $kind results disclose the clamp at limit $limit', async ({ kind, limit }) => {
+    rows = [];
+    const response =
+      kind === 'search'
+        ? await drive(runToolContract(tools.search, { query: 'absent', limit }))
+        : kind === 'heading'
+          ? await drive(runToolContract(tools.heading, { code: '7701', limit }))
+          : await drive(runToolContract(tools.browse, { chapter: '77', limit }));
+    assertTwin(response);
+    expect(response.structuredContent).toMatchObject({
+      page: { total: 0, returned: 0, effectiveLimit: 100 },
+      totalCount: 0,
+      notice: expect.stringContaining('usitc_'),
+    });
+    expect(text(response)).toContain('notice:');
+  });
 
   it.each(['identifiers', 'spi', 'chapters', 'units', 'releases'] as const)(
     'reference %s preserves typed fields and source provenance across every cursor',
@@ -486,127 +487,142 @@ describe('base tariff tool contracts', () => {
     },
   );
 
-  it('all byte-limited search pages include complete source rows, format and enrichment within 24 KB', async () => {
+  it.each([500, 501, 100_000])(
+    'search limit %i preserves every row within 24 KB',
+    async (limit) => {
+      rows = Array.from({ length: 120 }, (_, index) => ({
+        htsno: `8507.60.${String(index).padStart(2, '0')}`,
+        indent: '0',
+        description: `row-${index} ${'é🔋'.repeat(60)}`,
+        general: null,
+        customSource: { ordinal: index },
+      }));
+      const ordinals: number[] = [];
+      let cursor: string | undefined;
+      do {
+        const response = await drive(
+          runToolContract(tools.search, { query: 'many', limit, ...(cursor && { cursor }) }),
+        );
+        assertTwin(response);
+        const result = tools.search.output.parse(response.structuredContent);
+        expect(result.page.effectiveLimit).toBe(100);
+        expect(
+          Buffer.byteLength(
+            JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result: response }),
+          ),
+        ).toBeLessThanOrEqual(24_000);
+        expect(result.page.returned).toBeGreaterThan(0);
+        if (ordinals.length === 0) expect(result.page.budgetLimited).toBe(true);
+        ordinals.push(...result.rows.map((row) => row.sourceOrdinal));
+        cursor = result.page.nextCursor;
+        if (cursor && ordinals.length === result.page.returned) {
+          const changed = await drive(
+            runToolContract(tools.search, { query: 'many', limit: limit + 1, cursor }),
+          );
+          expect(changed.structuredContent).toMatchObject({
+            error: { data: { reason: 'invalid_cursor' } },
+          });
+          expect(text(changed)).toContain('invalid_cursor');
+        }
+        expect(ordinals.length).toBeLessThanOrEqual(120);
+      } while (cursor);
+      expect(ordinals).toEqual(Array.from({ length: 120 }, (_, index) => index));
+    },
+  );
+
+  it.each(
+    (['heading', 'browse'] as const).flatMap((kind) =>
+      [500, 501, 100_000].map((limit) => ({ kind, limit })),
+    ),
+  )('$kind limit $limit preserves the complete byte-limited forest', async ({ kind, limit }) => {
     rows = Array.from({ length: 120 }, (_, index) => ({
-      htsno: `8507.60.${String(index).padStart(2, '0')}`,
+      htsno: `9903.${String(Math.floor(index / 100)).padStart(2, '0')}.${String(index % 100).padStart(2, '0')}`,
       indent: '0',
-      description: `row-${index} ${'é🔋'.repeat(60)}`,
-      general: null,
-      customSource: { ordinal: index },
+      description: `Published root ${index}: ${'é🔋'.repeat(80)}`,
+      general: '25%',
+      special: '',
+      other: '35%',
     }));
-    const ordinals: number[] = [];
+    const codes: string[] = [];
     let cursor: string | undefined;
     do {
+      const response =
+        kind === 'heading'
+          ? await drive(
+              runToolContract(tools.heading, {
+                code: '9903',
+                limit,
+                ...(cursor && { cursor }),
+              }),
+            )
+          : await drive(
+              runToolContract(tools.browse, {
+                chapter: '99',
+                limit,
+                ...(cursor && { cursor }),
+              }),
+            );
+      assertTwin(response);
+      expect(
+        Buffer.byteLength(
+          JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result: response }),
+        ),
+      ).toBeLessThanOrEqual(24_000);
+      if (kind === 'heading') {
+        const result = tools.heading.output.parse(response.structuredContent);
+        expect(result.nodes.every((node) => !node.parentId)).toBe(true);
+        expect(result.page).toMatchObject({ total: 120, effectiveLimit: 100 });
+        codes.push(...result.nodes.map((node) => node.htsno!));
+        cursor = result.page.nextCursor;
+      } else {
+        const result = tools.browse.output.parse(response.structuredContent);
+        expect(result.notices).toContain(
+          'The export provides no verified subchapter crosswalk; subchapter grouping is unavailable.',
+        );
+        expect(
+          result.headings.every(
+            (heading) =>
+              heading.rateLineCount === 1 &&
+              heading.statisticalLineCount === 0 &&
+              heading.subchapter === undefined,
+          ),
+        ).toBe(true);
+        expect(result.page).toMatchObject({ total: 120, effectiveLimit: 100 });
+        codes.push(...result.headings.map((heading) => heading.code));
+        cursor = result.page.nextCursor;
+      }
+      expect(codes.length).toBeLessThanOrEqual(120);
+    } while (cursor);
+    expect(codes).toEqual(rows.map((row) => row.htsno));
+  });
+
+  it.each(
+    (['identifiers', 'spi', 'chapters', 'units', 'releases'] as const).flatMap((topic) =>
+      [500, 501, 100_000].map((limit) => ({ topic, limit })),
+    ),
+  )('reference $topic limit $limit remains complete within 24 KB', async ({ topic, limit }) => {
+    let cursor: string | undefined;
+    let count = 0;
+    let total = 0;
+    do {
       const response = await drive(
-        runToolContract(tools.search, { query: 'many', limit: 500, ...(cursor && { cursor }) }),
+        runToolContract(tools.reference, { topic, limit, ...(cursor && { cursor }) }),
       );
       assertTwin(response);
-      const result = tools.search.output.parse(response.structuredContent);
+      const result = tools.reference.output.parse(response.structuredContent);
       expect(result.page.effectiveLimit).toBe(100);
       expect(
         Buffer.byteLength(
           JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result: response }),
         ),
       ).toBeLessThanOrEqual(24_000);
-      expect(result.page.returned).toBeGreaterThan(0);
-      if (ordinals.length === 0) expect(result.page.budgetLimited).toBe(true);
-      ordinals.push(...result.rows.map((row) => row.sourceOrdinal));
+      total = result.page.total;
+      count += result.items.length;
       cursor = result.page.nextCursor;
-      expect(ordinals.length).toBeLessThanOrEqual(120);
+      expect(count).toBeLessThanOrEqual(total);
     } while (cursor);
-    expect(ordinals).toEqual(Array.from({ length: 120 }, (_, index) => index));
+    expect(count).toBe(total);
   });
-
-  it.each(['heading', 'browse'] as const)(
-    '%s preserves a long Chapter 99 forest across complete byte-limited maximum-limit pages',
-    async (kind) => {
-      rows = Array.from({ length: 120 }, (_, index) => ({
-        htsno: `9903.${String(Math.floor(index / 100)).padStart(2, '0')}.${String(index % 100).padStart(2, '0')}`,
-        indent: '0',
-        description: `Published root ${index}: ${'é🔋'.repeat(80)}`,
-        general: '25%',
-        special: '',
-        other: '35%',
-      }));
-      const codes: string[] = [];
-      let cursor: string | undefined;
-      do {
-        const response =
-          kind === 'heading'
-            ? await drive(
-                runToolContract(tools.heading, {
-                  code: '9903',
-                  limit: 500,
-                  ...(cursor && { cursor }),
-                }),
-              )
-            : await drive(
-                runToolContract(tools.browse, {
-                  chapter: '99',
-                  limit: 500,
-                  ...(cursor && { cursor }),
-                }),
-              );
-        assertTwin(response);
-        expect(
-          Buffer.byteLength(
-            JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result: response }),
-          ),
-        ).toBeLessThanOrEqual(24_000);
-        if (kind === 'heading') {
-          const result = tools.heading.output.parse(response.structuredContent);
-          expect(result.nodes.every((node) => !node.parentId)).toBe(true);
-          expect(result.page).toMatchObject({ total: 120, effectiveLimit: 100 });
-          codes.push(...result.nodes.map((node) => node.htsno!));
-          cursor = result.page.nextCursor;
-        } else {
-          const result = tools.browse.output.parse(response.structuredContent);
-          expect(result.notices).toContain(
-            'The export provides no verified subchapter crosswalk; subchapter grouping is unavailable.',
-          );
-          expect(
-            result.headings.every(
-              (heading) =>
-                heading.rateLineCount === 1 &&
-                heading.statisticalLineCount === 0 &&
-                heading.subchapter === undefined,
-            ),
-          ).toBe(true);
-          expect(result.page).toMatchObject({ total: 120, effectiveLimit: 100 });
-          codes.push(...result.headings.map((heading) => heading.code));
-          cursor = result.page.nextCursor;
-        }
-        expect(codes.length).toBeLessThanOrEqual(120);
-      } while (cursor);
-      expect(codes).toEqual(rows.map((row) => row.htsno));
-    },
-  );
-
-  it.each(['identifiers', 'spi', 'chapters', 'units', 'releases'] as const)(
-    'reference %s maximum-limit replies remain complete and within 24 KB',
-    async (topic) => {
-      let cursor: string | undefined;
-      let count = 0;
-      let total = 0;
-      do {
-        const response = await drive(
-          runToolContract(tools.reference, { topic, limit: 500, ...(cursor && { cursor }) }),
-        );
-        assertTwin(response);
-        const result = tools.reference.output.parse(response.structuredContent);
-        expect(
-          Buffer.byteLength(
-            JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result: response }),
-          ),
-        ).toBeLessThanOrEqual(24_000);
-        total = result.page.total;
-        count += result.items.length;
-        cursor = result.page.nextCursor;
-        expect(count).toBeLessThanOrEqual(total);
-      } while (cursor);
-      expect(count).toBe(total);
-    },
-  );
 
   it('rejects changed selectors, changed limits and cross-tool cursors with declared recovery', async () => {
     const first = tools.search.output.parse(
@@ -758,7 +774,7 @@ describe('base tariff tool contracts', () => {
   });
 
   it('schema-invalid limits return wire InvalidParams before any network request', async () => {
-    for (const limit of [0, 501, 1.5]) {
+    for (const limit of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       const result = await drive(runToolContract(tools.search, { query: 'battery', limit }));
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({
@@ -768,6 +784,19 @@ describe('base tariff tool contracts', () => {
     }
     expect(requests).toEqual([]);
   });
+
+  it.each([501, 100_000])(
+    'empty release references disclose clamping for limit %i',
+    async (limit) => {
+      releaseRecords = [];
+      const response = await drive(runToolContract(tools.reference, { topic: 'releases', limit }));
+      assertTwin(response);
+      expect(response.structuredContent).toMatchObject({
+        page: { total: 0, returned: 0, effectiveLimit: 100 },
+        items: [],
+      });
+    },
+  );
 
   it.each(['search', 'heading', 'browse', 'duty', 'reference'] as const)(
     '%s reports repeated edition transitions with its own declared recovery',
