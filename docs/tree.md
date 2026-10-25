@@ -1,6 +1,6 @@
 # usitc-tariffs-mcp-server - Directory Structure
 
-Generated on: 2026-10-25 12:10:54
+Generated on: 2026-10-25 12:18:52
 
 ```text
 usitc-tariffs-mcp-server/
@@ -24,6 +24,7 @@ usitc-tariffs-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -203,6 +204,7 @@ usitc-tariffs-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
