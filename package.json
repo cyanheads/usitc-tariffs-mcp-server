@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/usitc-tariffs-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "mcpName": "io.github.cyanheads/usitc-tariffs-mcp-server",
   "description": "Search USITC tariff schedules, inspect heading trees, and look up published duty rates via MCP. STDIO or Streamable HTTP.",
   "author": "Casey Hand <casey@caseyjhand.com> (https://caseyjhand.com)",
