@@ -40,6 +40,7 @@ const SNAPSHOT_MS = 15 * 60_000;
 const CONSISTENCY_NOTICE =
   'USITC current-view metadata checks cannot detect a silent correction within the same release; source digests and a 15-minute snapshot lifetime bound reuse.';
 const RETRY_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const HTML_DOCUMENT = /^\s*<(?:!doctype\s+html|html|head|body)[\s>]/i;
 const pacer = createPacer({
   name: 'usitc',
   minStartGapMs: 1000,
@@ -273,21 +274,7 @@ export class UsitcService {
         const session: UsitcEditionSession = {
           release: metadata.release,
           getRowsSnapshot: (snapshotId) => {
-            const entry = this.snapshots.get(snapshotId);
-            if (
-              !entry ||
-              entry.expiresAt <= this.now() ||
-              entry.snapshot.release.name !== metadata.release.name
-            ) {
-              this.snapshots.delete(snapshotId);
-              throw conflict(
-                'USITC snapshot expired, was evicted, or belongs to a previous release.',
-                { reason: 'cursor_expired' },
-              );
-            }
-            this.snapshots.delete(snapshotId);
-            this.snapshots.set(snapshotId, entry);
-            const snapshot = structuredClone(entry.snapshot);
+            const snapshot = structuredClone(this.liveSnapshot(snapshotId, metadata.release.name));
             components.push(snapshot);
             return Promise.resolve(snapshot);
           },
@@ -352,17 +339,16 @@ export class UsitcService {
             return records;
           },
         };
-        const service = this;
-        async function rows(request: Request): Promise<RowsSnapshot> {
+        const rows = async (request: Request): Promise<RowsSnapshot> => {
           const key = requestUrl(request).href;
-          const cached = service.cachedRows(key, metadata.release.name);
+          const cached = this.cachedRows(key, metadata.release.name);
           if (cached) {
             components.push(cached);
             return cached;
           }
           fetched = true;
-          const body = await service.request(request, op);
-          const raw = service.json(body, z.array(tariffRecordSchema));
+          const body = await this.request(request, op);
+          const raw = this.json(body, z.array(tariffRecordSchema));
           const notices = [CONSISTENCY_NOTICE];
           if (raw.some((row) => row.addiitionalDuties != null))
             notices.push(
@@ -389,10 +375,10 @@ export class UsitcService {
               normalizeRow(row, index, metadata.release.name, body.digest),
             ),
           };
-          staged.push({ snapshot, requestKey: key, expiresAt: service.now() + SNAPSHOT_MS });
+          staged.push({ snapshot, requestKey: key, expiresAt: this.now() + SNAPSHOT_MS });
           components.push(snapshot);
           return snapshot;
-        }
+        };
         const data = await build(session);
         const checked = fetched ? await this.currentRelease(op, true) : metadata;
         if (
@@ -430,21 +416,23 @@ export class UsitcService {
   getRowsSnapshot(snapshotId: string, ctx: Context): Promise<RowsSnapshot> {
     return this.operation(ctx, async (op) => {
       const metadata = await this.currentRelease(op, false);
-      const entry = this.snapshots.get(snapshotId);
-      if (
-        !entry ||
-        entry.expiresAt <= this.now() ||
-        entry.snapshot.release.name !== metadata.release.name
-      ) {
-        this.snapshots.delete(snapshotId);
-        throw conflict('USITC snapshot expired, was evicted, or belongs to a previous release.', {
-          reason: 'cursor_expired',
-        });
-      }
-      this.snapshots.delete(snapshotId);
-      this.snapshots.set(snapshotId, entry);
-      return { ...entry.snapshot, release: metadata.release };
+      return {
+        ...this.liveSnapshot(snapshotId, metadata.release.name),
+        release: metadata.release,
+      };
     });
+  }
+
+  /** Refresh a live snapshot's LRU position; expired, evicted or other-release entries are gone. */
+  private liveSnapshot(snapshotId: string, release: string): RowsSnapshot {
+    const entry = this.snapshots.get(snapshotId);
+    this.snapshots.delete(snapshotId);
+    if (!entry || entry.expiresAt <= this.now() || entry.snapshot.release.name !== release)
+      throw conflict('USITC snapshot expired, was evicted, or belongs to a previous release.', {
+        reason: 'cursor_expired',
+      });
+    this.snapshots.set(snapshotId, entry);
+    return entry.snapshot;
   }
 
   private cachedRows(requestKey: string, release: string): RowsSnapshot | undefined {
@@ -511,8 +499,6 @@ export class UsitcService {
         { cause },
       );
     }
-    if (/^\s*<(?:!doctype\s+html|html|head|body)[\s>]/i.test(text))
-      throw serviceUnavailable('USITC returned HTML instead of JSON.');
     let value: unknown;
     try {
       value = JSON.parse(text);
@@ -601,11 +587,10 @@ export class UsitcService {
               }
               const bytes = await readBody(response, signal);
               signal.throwIfAborted();
+              // Every JSON endpoint is screened here, before json() parses the body.
               if (
                 request.endpoint !== 'getChapterNotes' &&
-                /^\s*<(?:!doctype\s+html|html|head|body)[\s>]/i.test(
-                  new TextDecoder().decode(bytes),
-                )
+                HTML_DOCUMENT.test(new TextDecoder().decode(bytes))
               )
                 throw serviceUnavailable('USITC returned HTML instead of JSON.');
               return {

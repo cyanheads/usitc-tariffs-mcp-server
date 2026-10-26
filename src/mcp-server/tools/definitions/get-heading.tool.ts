@@ -15,13 +15,14 @@ import {
   metadataShape,
   pageSchema,
   paginationInputShape,
+  tariffRowShape,
 } from '../schemas.js';
 
 /** Reconstruct before filtering and expose executable parent/source lookups. */
 export const getHeadingTool = tool('usitc_get_heading', {
   title: 'Inspect an HTS heading and ancestry',
   description:
-    'Inspect a four-, six- or eight-digit HTS classification and its complete indented descendants, including unnamed superior rows. Ancestry is built from the whole containing heading before filtering. Each parent and inherited-rate source has an exact nodeId follow-up. Chapters 98 and 99 preserve published forest roots without inventing four-digit records.',
+    'Inspect a four-, six- or eight-digit HTS classification and its complete indented descendants, including unnamed superior rows. Published section titles are retained separately in sections, outside legal ancestry. Ancestry is built from the whole containing heading before filtering. Each parent and inherited-rate source has an exact nodeId follow-up. Chapters 98 and 99 preserve published forest roots without inventing four-digit records.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     code: z
@@ -46,6 +47,15 @@ export const getHeadingTool = tool('usitc_get_heading', {
     nodes: z
       .array(headingNodeSchema)
       .describe('Flat source-order nodes with legal parents and rate provenance.'),
+    sections: z
+      .array(
+        z
+          .object(tariffRowShape)
+          .describe('One complete published subchapter marker retained outside legal ancestry.'),
+      )
+      .describe(
+        'Complete published section markers from the containing heading, separate from legal ancestry.',
+      ),
     page: pageSchema.describe('Complete selected subtree and continuation.'),
     guidance: z
       .string()

@@ -154,6 +154,177 @@ afterEach(async () => {
 });
 
 describe('additional-duty source contract', () => {
+  it('uses the verified combined 7208 rate line for eight-digit list evidence on both public surfaces', async () => {
+    rows = [
+      {
+        htsno: '7208',
+        indent: '0',
+        description:
+          'Flat-rolled products of iron or nonalloy steel, of a width of 600 mm or more, hot-rolled, not clad, plated or coated:',
+      },
+      {
+        htsno: '7208.10',
+        indent: '1',
+        description: 'In coils, not further worked than hot-rolled, with patterns in relief:',
+      },
+      {
+        htsno: '7208.10.15.00',
+        indent: '2',
+        description: 'Pickled',
+        general: 'Free',
+        other: '0.4¢/kg + 20%',
+        units: ['kg'],
+      },
+    ];
+    html = chapterNote(
+      1,
+      '<ul><li value="(a)">(a) Heading 9903.88.01 applies to products enumerated in this subdivision:<table><tr><td>7208.10.15</td></tr></table></li></ul>',
+    );
+    const result = success(await call({ code: '7208.10.15.00' }));
+    const evidence = success(await call(result.candidates![0]!.evidenceFollowUp.arguments));
+    expect(evidence.evidence).toEqual([
+      expect.objectContaining({
+        matchedCode: '72081015',
+        matchLevel: 'rate_line',
+        relation: 'inclusion_candidate',
+      }),
+    ]);
+  });
+  it('does not let a heading country override a conditional linked governor country scope', async () => {
+    rows.forEach((row) => {
+      delete row.footnotes;
+    });
+    rates[0]!.description = 'Articles the product of Canada as provided in this heading.';
+    html = chapterNote(
+      1,
+      '<ul><li value="(a)">(a) Heading 9903.88.01 applies to products of China that are classified in the following 8-digit subheadings, provided that the conditions are met:<ul><li value="(1)">(1) 0101.21.00</li></ul></li></ul>',
+    );
+    expect(success(await call({ countryCode: 'CA' })).candidates![0]!.countryRelation).toBe(
+      'unknown',
+    );
+  });
+  it.each([
+    ['Parts of passenger vehicles and light trucks of the United Kingdom.', 'GB'],
+    [
+      'Except for products described in headings 9903.05.85–9903.05.92, articles the product of Vietnam, as provided for in U.S. note 52 to this subchapter',
+      'VN',
+    ],
+    ['Products of Canada and China.', 'CA'],
+    ['If eligible, products of Canada.', 'CA'],
+  ])(
+    'keeps unsupported or qualified heading country scope unknown: %s',
+    async (description, countryCode) => {
+      rows.forEach((row) => {
+        delete row.footnotes;
+      });
+      rates = [{ htsno: '9903.88.01', indent: '0', description }];
+      html = chapterNote(1, '9903.88.01 concerns 0101.21.00.');
+      const result = success(await call({ countryCode }));
+      expect(result.candidates![0]!.countryRelation).toBe('unknown');
+      expect(result.countryFilter).toMatchObject({
+        namedCount: 0,
+        unknownCount: 1,
+        differentCountryCount: 0,
+      });
+    },
+  );
+  it.each(['CN', 'US'])(
+    'retains conflicting heading and linked governor country scopes as unknown for %s',
+    async (countryCode) => {
+      rows.forEach((row) => {
+        delete row.footnotes;
+      });
+      rates[0]!.description = 'Articles the product of Canada as provided in this heading.';
+      const result = success(await call({ countryCode }));
+      expect(result.candidates!.find((item) => item.code === '9903.88.01')!.countryRelation).toBe(
+        'unknown',
+      );
+    },
+  );
+  it('retrieves both owned numbered list evidence and its entire governor through paged public responses', async () => {
+    rows.forEach((row) => {
+      delete row.footnotes;
+    });
+    rates[0]!.description =
+      'Effective with respect to entries on or after January 1, 2026, articles the product of China, as provided for in subdivision (g) of U.S. note 31 to this subchapter';
+    const clause = `(a) Heading 9903.88.01 applies to products of China that are classified in the following 8-digit subheadings: ${'Published date and source qualification. '.repeat(150)}`;
+    html = chapterNote(
+      1,
+      `<ul><li value="(a)">${clause}<ul><li value="(1)">(1) 0101.21.00</li></ul></li></ul>`,
+    );
+    const candidates = success(await call({ countryCode: 'CN', limit: 1 }));
+    expect(candidates.candidates![0]).toMatchObject({ countryRelation: 'named', evidenceCount: 2 });
+    expect(candidates.countryFilter).toMatchObject({ namedCount: 1, unknownCount: 0 });
+    const first = success(
+      await call({ ...candidates.candidates![0]!.evidenceFollowUp.arguments, limit: 1 }),
+    );
+    expect(first.evidence![0]).toMatchObject({
+      role: 'product_list',
+      relation: 'inclusion_candidate',
+    });
+    const second = success(await call(first.nextCall!.arguments));
+    expect(second.evidence![0]).toMatchObject({ role: 'governing', relation: 'context_only' });
+    for (const pointer of [first.evidence![0]!, second.evidence![0]!]) {
+      let page = success(await call({ ...pointer.followUp.arguments, limit: 1 }));
+      const fragments = [...page.notesPage!.fragments];
+      while (page.notesPage!.nextCall) {
+        page = success(await call(page.notesPage!.nextCall.arguments));
+        fragments.push(...page.notesPage!.fragments);
+      }
+      expect(fragments.map((item) => item.text).join('')).toContain(
+        pointer.role === 'governing' ? clause : '(1) 0101.21.00',
+      );
+      expect(fragments).toHaveLength(fragments[0]!.fragmentCount);
+    }
+  });
+  it('retains sentence-final footnote pointers as context and rejects extended and malformed prefixes', async () => {
+    rows.forEach((row) => {
+      delete row.footnotes;
+    });
+    rows[3]!.footnotes = [
+      {
+        value: 'See 9903.90.08. Invalid 9903.90.09.10 9903.90.10.1 9903.90.11..10 x9903.90.12.',
+        columns: ['other'],
+      },
+    ];
+    html = chapterNote(1, 'Reserved.');
+    const result = success(await call());
+    expect(result.candidates!.map((item) => item.code)).toEqual(['9903.90.08']);
+    const evidence = success(await call(result.candidates![0]!.evidenceFollowUp.arguments));
+    expect(evidence.evidence![0]).toMatchObject({
+      relation: 'context_only',
+      countryRelation: 'not_requested',
+      footnote: { columns: ['other'], value: rows[3]!.footnotes![0]!.value },
+    });
+  });
+  it.each(['CA', 'CN', undefined])(
+    'labels reviewed Canada heading scope for %s without changing product inclusion',
+    async (countryCode) => {
+      rows.forEach((row) => {
+        delete row.footnotes;
+      });
+      rates = [
+        {
+          htsno: '9903.03.12',
+          indent: '0',
+          description: 'Articles the product of Canada as provided in this heading.',
+        },
+      ];
+      html = chapterNote(1, '9903.03.12 concerns 0101.21.00.');
+      const result = success(await call({ countryCode }));
+      expect(result.candidates![0]).toMatchObject({
+        countryRelation: !countryCode
+          ? 'not_requested'
+          : countryCode === 'CA'
+            ? 'named'
+            : 'different_country',
+        legalStatus: 'not_determined',
+      });
+      expect(result.collectionTotals!.candidates).toBe(1);
+      const evidence = success(await call(result.candidates![0]!.evidenceFollowUp.arguments));
+      expect(evidence.evidence![0]!.relation).toBe('context_only');
+    },
+  );
   it('discloses the declared notes charset and exact source normalization rule on both surfaces', async () => {
     const result = await call();
     success(result);
@@ -570,8 +741,11 @@ describe('additional-duty source contract', () => {
       delete row.footnotes;
     });
     rows.splice(2, 1);
+    // Two descendants cannot supply a uniquely verified eight-digit rate line.
+    rows.push({ htsno: '0101.21.00.20', indent: '3', description: 'Female' });
     const noParent = success(await call());
     expect(noParent.candidates).toEqual([]);
+    rows.pop();
     (await import('@/services/usitc/usitc-service.js')).initUsitcService();
     rows.splice(2, 0, { htsno: '0101.21.00', indent: '2', description: 'Horses' });
     html = chapterNote(

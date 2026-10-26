@@ -1,16 +1,24 @@
 /**
- * @fileoverview Reviewed General Note 3(c)(i) symbol table and 3(g) abbreviations.
+ * @fileoverview Reviewed General Note 3(b) country list, 3(c)(i) symbols and 3(g) abbreviations.
  * @module services/reference/program-data
  */
 
 /** Edition of the reviewed General Note 3 PDF; never relabel this with the live edition. */
 export const decoderSourceEdition = '2026HTSRev21';
-/** Pinned official source; GN pages 4–5 contain symbols, pages 7–8 contain abbreviations. */
+/** Pinned official source; GN page 4 lists Column 2 countries, pages 4–5 symbols, pages 7–8 abbreviations. */
 export const generalNote3Url =
   'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203';
 /** Legal requirements remain unresolved even for a recognized program symbol. */
 export const qualificationNotice =
   'Program identification does not establish origin qualification, product eligibility, quota status, program availability or the legally applicable rate.';
+
+/** Complete GN3(b), GN page 4 list, mapped to assigned ISO 3166-1 alpha-2 identifiers. */
+export const column2Countries = [
+  ['BY', 'Republic of Belarus'],
+  ['CU', 'Cuba'],
+  ['KP', 'North Korea'],
+  ['RU', 'Russian Federation'],
+] as const;
 
 /** Complete symbol/name transcription; suffixes identify distinct published symbols. */
 export const programNames = [

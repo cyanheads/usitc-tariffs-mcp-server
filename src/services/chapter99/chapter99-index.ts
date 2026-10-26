@@ -32,13 +32,15 @@ export interface NotePassage {
   text: string;
 }
 
-/** A supported positive link; the source and target passages remain separately retrievable. */
+/** A bounded source link; descriptive children retain qualification rather than product inclusion. */
 export interface ExplicitListLink {
-  countryCode?: 'CN';
+  countryCode?: 'CN' | 'CA';
+  countryScopeUncertain?: true;
   governingNoteId: string;
-  grammar: 'same_note_enumeration' | 'same_subdivision_table';
+  grammar: 'same_note_enumeration' | 'same_subdivision_table' | 'owned_following_list';
   heading: string;
   listNoteId: string;
+  qualified?: true;
 }
 
 /** Partial coverage facts, rather than an applicability or parser confidence claim. */
@@ -85,7 +87,7 @@ export interface NoteFragment {
   text: string;
 }
 
-const CODE = /(?<![\w.])(?:\d{4}\.\d{2}\.\d{2}(?:\.?\d{2})?|\d{10}|\d{8})(?![\d.]|\w)/g;
+const CODE = /(?<![\w.])(?:\d{4}\.\d{2}\.\d{2}(?:\.?\d{2})?|\d{10}|\d{8})(?!\w|\.[\w.])/g;
 const EXCEPTION =
   /\b(?:except|other than|excluding|exclusions?|notwithstanding|do not apply|does not apply|shall not apply|not subject to)\b/i;
 const BLOCKS = new Set([
@@ -107,6 +109,7 @@ const GRAMMARS = [
   'exact_code_tokens',
   'same_note_enumeration',
   'same_subdivision_table',
+  'owned_following_list',
   'qualified_co_mentions',
 ];
 
@@ -131,6 +134,24 @@ function ownText(node: Node): string {
 
 function codes(text: string): string[] {
   return [...new Set([...text.matchAll(CODE)].map((match) => match[0].replaceAll('.', '')))];
+}
+
+function chapter99Headings(digits: readonly string[]): string[] {
+  return digits.filter((code) => code.startsWith('99') && code.length === 8);
+}
+
+/** Reviewed published product-of names; uncertain or qualified country scope remains unknown. */
+export function productCountry(text: string): 'CN' | 'CA' | undefined {
+  if (EXCEPTION.test(text) || /\b(?:if|unless|provided that|subject to whether)\b/i.test(text))
+    return undefined;
+  if ([...text.matchAll(/\bproducts? of\b/gi)].length !== 1) return undefined;
+  const scopes = [...text.matchAll(/\bproducts? of (China|Canada)\b/gi)];
+  const [scope] = scopes;
+  if (scopes.length !== 1 || !scope) return undefined;
+  const tail = text.slice(scope.index + scope[0].length);
+  // A coordinated or alternative country is not an exclusive single-country scope.
+  if (/^\s*(?:,(?!\s*as provided\b)|and\b|or\b|\/)/i.test(tail)) return undefined;
+  return scope[0].toLowerCase().endsWith('china') ? 'CN' : 'CA';
 }
 
 /** Compiler annotations remain source text but cannot supply a positive legal clause or list entry. */
@@ -178,6 +199,7 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
   let listCodes: string[] = [];
   let sawChapter = false;
   let sawNotes = false;
+  const listNodes = new Map<Element, number>();
 
   function flush(): void {
     if (!text) return;
@@ -205,6 +227,14 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
     listCodes = [];
   }
 
+  function resetNote(): void {
+    noteNumber = undefined;
+    subdivision = undefined;
+    previousNote = 0;
+    previousAlpha = '';
+    recognized = false;
+  }
+
   function visit(node: Node): void {
     if (node.nodeName === '#text' && 'value' in node) {
       text += node.value;
@@ -220,25 +250,18 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
         if (title) {
           flush();
           subchapter = title[1];
-          noteNumber = undefined;
-          subdivision = undefined;
-          previousNote = 0;
-          previousAlpha = '';
-          recognized = false;
+          resetNote();
         }
       }
       if (/misc_note_title\b/.test(className)) {
         flush();
         section = direct;
         sawNotes ||= /U\.S\.\s*Notes/i.test(direct);
-        noteNumber = undefined;
-        subdivision = undefined;
-        previousNote = 0;
-        previousAlpha = '';
-        recognized = false;
+        resetNote();
       }
       if (node.tagName === 'li') {
         flush();
+        listNodes.set(node, passages.length);
         const attribute = node.attrs.find((attr) => attr.name === 'value')?.value.trim();
         const numbered = /^(\d+)\./.exec(direct);
         const alpha = /^(?:\(([a-z]+)\)|([a-z]+)\.)/.exec(direct);
@@ -296,17 +319,79 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
       retryable: false,
     });
 
-  const unique = new Map<string, NotePassage[]>();
-  for (const passage of passages) {
-    if (!passage.noteNumber || (!passage.subdivision && passage.locatorStatus !== 'recognized'))
-      continue;
-    const entries = unique.get(key(passage)) ?? [];
-    entries.push(passage);
-    unique.set(key(passage), entries);
-  }
+  const unique = Map.groupBy(
+    passages.filter(
+      (passage) =>
+        passage.noteNumber && (passage.subdivision || passage.locatorStatus === 'recognized'),
+    ),
+    key,
+  );
   for (const entries of unique.values())
     if (entries.length > 1) for (const passage of entries) passage.locatorStatus = 'ambiguous';
   const links: ExplicitListLink[] = [];
+  // DOM ownership bounds this grammar only; it never supplies or repairs a legal locator.
+  for (const [node, ordinal] of listNodes) {
+    const governor = passages[ordinal];
+    if (!governor) continue;
+    const direct = ownText(node).trim();
+    const label = /^(\([a-z]+\))/.exec(direct)?.[1];
+    if (!label || node.attrs.find((attr) => attr.name === 'value')?.value.trim() !== label)
+      continue;
+    const headings = chapter99Headings(codes(direct));
+    const [heading] = headings;
+    if (
+      headings.length !== 1 ||
+      !heading ||
+      EXCEPTION.test(direct) ||
+      /compiler[’']?s?\s+note/i.test(direct) ||
+      !/^\([a-z]+\)\s*Heading\s+99\d{2}\.\d{2}\.\d{2}\s+applies to products\b/i.test(direct) ||
+      !/\b(?:classified|described) in the following (?:8-digit subheadings|10-digit statistical reporting numbers)\b/i.test(
+        direct,
+      )
+    )
+      continue;
+    const lists = node.childNodes.filter(
+      (child): child is Element => element(child) && ['ul', 'ol'].includes(child.tagName),
+    );
+    const [list] = lists;
+    if (lists.length !== 1 || !list) continue;
+    const countryCode = productCountry(direct);
+    const precision = /following (8|10)-digit/.exec(direct)?.[1];
+    for (const child of list.childNodes) {
+      if (!element(child) || child.tagName !== 'li') continue;
+      const entry = ownText(child).trim();
+      const itemLabel = /^(\(\d+\))\s*/.exec(entry);
+      if (
+        !itemLabel ||
+        child.attrs.find((attr) => attr.name === 'value')?.value.trim() !== itemLabel[1] ||
+        child.childNodes.some(
+          (descendant) =>
+            element(descendant) && ['ul', 'ol', 'table', 'li', 'div'].includes(descendant.tagName),
+        )
+      )
+        continue;
+      const targetOrdinal = listNodes.get(child);
+      const target = targetOrdinal === undefined ? undefined : passages[targetOrdinal];
+      const value = entry.slice(itemLabel[0].length);
+      const exact = codes(value);
+      const [firstCode] = exact;
+      if (!target || !firstCode || exact.some((code) => code.startsWith('99'))) continue;
+      const qualified =
+        exact.length !== 1 ||
+        value.replaceAll('.', '') !== firstCode ||
+        firstCode.length !== Number(precision);
+      links.push({
+        heading,
+        governingNoteId: governor.noteId,
+        listNoteId: target.noteId,
+        grammar: 'owned_following_list',
+        ...(countryCode && { countryCode }),
+        ...(!countryCode &&
+          /\bproducts? of\b/i.test(direct) && { countryScopeUncertain: true as const }),
+        ...(qualified && { qualified: true as const }),
+      });
+    }
+  }
   for (const passage of passages) {
     if (passage.locatorStatus !== 'recognized') continue;
     const positive = withoutCompilerNotices(passage.text).split(EXCEPTION, 1)[0] ?? '';
@@ -328,41 +413,44 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
       const sentenceStart = positive.lastIndexOf('. ', reference.index);
       const sentence = positive.slice(
         sentenceStart < 0 ? 0 : sentenceStart + 2,
-        (reference.index ?? 0) + reference[0].length,
+        reference.index + reference[0].length,
       );
-      const headings = codes(sentence).filter((code) => code.startsWith('99') && code.length === 8);
+      const headings = chapter99Headings(codes(sentence));
       if (
         headings.length !== 1 ||
         !/\b(?:subject to|appl(?:y|ies)|imposed by|under heading)\b/i.test(sentence)
       )
         continue;
+      const countryCode = productCountry(sentence);
       links.push({
         heading: headings[0] ?? '',
         governingNoteId: passage.noteId,
         listNoteId: target.noteId,
         grammar: 'same_note_enumeration',
-        ...(/products of China (?:that are|as provided)/i.test(sentence) && {
-          countryCode: 'CN' as const,
-        }),
+        ...(countryCode && { countryCode }),
+        ...(!countryCode &&
+          /\bproducts? of\b/i.test(sentence) && { countryScopeUncertain: true as const }),
       });
     }
     const opening = positive.split('\t', 1)[0] ?? '';
-    const headings = codes(opening).filter((code) => code.startsWith('99') && code.length === 8);
+    const headings = chapter99Headings(codes(opening));
     if (
       passage.listCodes.length &&
       headings.length === 1 &&
       /heading\s+99\d{2}\.\d{2}\.\d{2}\s+applies to products\b/i.test(opening) &&
       /enumerated in this subdivision/i.test(opening)
-    )
+    ) {
+      const countryCode = productCountry(opening);
       links.push({
         heading: headings[0] ?? '',
         governingNoteId: passage.noteId,
         listNoteId: passage.noteId,
         grammar: 'same_subdivision_table',
-        ...(/applies to products of China that are/i.test(opening) && {
-          countryCode: 'CN' as const,
-        }),
+        ...(countryCode && { countryCode }),
+        ...(!countryCode &&
+          /\bproducts? of\b/i.test(opening) && { countryScopeUncertain: true as const }),
       });
+    }
   }
   const deduplicatedLinks = [
     ...new Map(
@@ -391,7 +479,7 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
     mentions,
     coverage: {
       status: 'partial',
-      parserVersion: 'chapter99-1',
+      parserVersion: 'chapter99-2',
       sourceDigest: source.sourceDigest,
       supportedGrammar: GRAMMARS,
       totalNoteBlocks: passages.length,
@@ -406,7 +494,7 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
         'Only exact 8/10-digit mentions and bounded positive same-note list links are indexed.',
         'DOM nesting does not establish legal hierarchy; conflicting labels remain ambiguous.',
         'Product-independent provisions, ranges, external annexes, derivative/content tests and legal applicability are not determined.',
-        'Country scope is unknown except for reviewed explicit products-of-China enumeration clauses.',
+        'Country scope recognizes only reviewed single positive product(s)-of-China or Canada clauses; other or qualified wording remains unknown.',
         'Published status words do not establish current enforceability.',
       ],
     },
@@ -444,7 +532,9 @@ export function findChapter99Evidence(
   for (const [matchedCode, matchLevel] of matched)
     for (const passage of index.mentions.get(matchedCode) ?? []) {
       const links = index.links.filter(
-        (link) => link.listNoteId === passage.noteId && passage.listCodes.includes(matchedCode),
+        (link) =>
+          link.listNoteId === passage.noteId &&
+          (passage.listCodes.includes(matchedCode) || link.grammar === 'owned_following_list'),
       );
       function record(
         target: NotePassage,
@@ -453,15 +543,11 @@ export function findChapter99Evidence(
         role: Chapter99Evidence['role'],
         link?: ExplicitListLink,
       ): Chapter99Evidence {
+        // Compiler annotations never carry a positive relation of their own.
+        const notice = target.compilerNotice && relation !== 'inclusion_candidate';
         return {
-          kind:
-            target.compilerNotice && relation !== 'inclusion_candidate'
-              ? 'compiler_notice'
-              : link
-                ? 'explicit_list_link'
-                : 'same_passage_mention',
-          relation:
-            target.compilerNotice && relation !== 'inclusion_candidate' ? 'context_only' : relation,
+          kind: notice ? 'compiler_notice' : link ? 'explicit_list_link' : 'same_passage_mention',
+          relation: notice ? 'context_only' : relation,
           role,
           noteId: target.noteId,
           passageId: target.passageId,
@@ -480,9 +566,10 @@ export function findChapter99Evidence(
         };
       }
       for (const link of links) {
-        const relation = codes(withoutCompilerNotices(passage.text)).includes(matchedCode)
-          ? 'inclusion_candidate'
-          : 'context_only';
+        const relation =
+          codes(withoutCompilerNotices(passage.text)).includes(matchedCode) && !link.qualified
+            ? 'inclusion_candidate'
+            : 'context_only';
         evidence.push(record(passage, link.heading, relation, 'product_list', link));
         if (passage.compilerNotice)
           evidence.push({
@@ -504,9 +591,7 @@ export function findChapter99Evidence(
           )
             evidence.push(record(sibling, link.heading, 'context_only', 'qualification', link));
       }
-      const headings = passage.codeMentions.filter(
-        (code) => code.startsWith('99') && code.length === 8,
-      );
+      const headings = chapter99Headings(passage.codeMentions);
       if (links.length === 0) {
         const relation = EXCEPTION.test(passage.text) ? 'exclusion_or_exception' : 'context_only';
         if (headings.length && passage.locatorStatus === 'recognized')

@@ -6,6 +6,7 @@ import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import { chapterLabelsSource, chapterSections } from './chapter-data.js';
 import { isoCountryCodes } from './iso-countries.js';
 import {
+  column2Countries,
   decoderSourceEdition,
   generalNote3Url,
   programNames,
@@ -24,13 +25,18 @@ export interface NormalizedCode {
   length: CodeLength;
 }
 
+/** Bare 4/6/8/10 digits, or dots at the conventional boundaries (including NNNN.NN.NNNN). */
+const CODE_FORM = /^(?:\d{4}(?:\d{2}){0,3}|\d{4}\.\d{2}(?:\.\d{2}){0,2}|\d{4}\.\d{2}\.\d{4})$/;
+const SPI_CITATION = 'General Note 3(c)(i)';
+const column2CountryCodes: ReadonlySet<string> = new Set(column2Countries.map(([code]) => code));
+
 /** Normalize only complete conventional identifiers; never remove arbitrary punctuation. */
 export function normalizeCode(
   input: string,
   allowedLengths: readonly CodeLength[] = [4, 6, 8, 10],
 ): NormalizedCode {
   const value = input.trim();
-  if (!/^(?:\d{4}(?:\d{2}){0,3}|\d{4}\.\d{2}(?:\.\d{2}){0,2}|\d{4}\.\d{2}\.\d{4})$/.test(value)) {
+  if (!CODE_FORM.test(value)) {
     throw validationError('Use 4, 6, 8 or 10 digits with conventional HTS dot boundaries.', {
       reason: 'invalid_code',
     });
@@ -79,8 +85,7 @@ export function normalizeCountryCode(input?: string): string | undefined {
 export function normalizeSearchQuery(input: string): string {
   const value = input.trim();
   if (!value) throw validationError('Supply a nonblank commodity description or HTS code prefix.');
-  if (/^(?:\d{4}(?:\d{2}){0,3}|\d{4}\.\d{2}(?:\.\d{2}){0,2}|\d{4}\.\d{2}\.\d{4})$/.test(value))
-    return normalizeCode(value).code;
+  if (CODE_FORM.test(value)) return normalizeCode(value).code;
   return value;
 }
 
@@ -100,7 +105,7 @@ const programs: readonly ProgramReference[] = programNames.map(([symbol, name]) 
   kind: 'program',
   symbol,
   name,
-  citation: 'General Note 3(c)(i)',
+  citation: SPI_CITATION,
   sourceUrl: generalNote3Url,
   sourceEdition: decoderSourceEdition,
   conditionality: 'All legal requirements of the program must be met; General Note 3(a)(iii).',
@@ -270,7 +275,7 @@ export function parseSpecialCell(publishedText: string, countryCode?: string): P
     clauses,
     decoder: {
       sourceEdition: decoderSourceEdition,
-      citation: 'General Note 3(c)(i)',
+      citation: SPI_CITATION,
       sourceUrl: generalNote3Url,
       qualificationNotice,
     },
@@ -287,18 +292,36 @@ export function assessCountry(
   releaseName: string,
 ) {
   const country = normalizeCountryCode(countryCode);
+  const editionMatches = releaseName === decoderSourceEdition;
   return {
     ...(country ? { countryCode: country } : {}),
+    ...(country
+      ? {
+          column2Listing: {
+            status: !editionMatches
+              ? ('unknown' as const)
+              : column2CountryCodes.has(country)
+                ? ('listed' as const)
+                : ('not_listed' as const),
+            citation: 'General Note 3(b)',
+            sourceEdition: decoderSourceEdition,
+            sourceUrl: generalNote3Url,
+          },
+        }
+      : {}),
     eligibility: 'not_determined' as const,
     columnSelection: 'not_determined' as const,
     membershipCoverage: 'unknown' as const,
     decoderSourceEdition,
-    editionMatches: releaseName === decoderSourceEdition,
+    editionMatches,
     recognizedSymbolCount: special.clauses
       .flatMap((clause) => clause.programs)
       .filter((program) => program.recognized).length,
-    notice:
-      'No country-linked Special program was identified by the available decoder; country membership has not been independently verified. General and Column 2 selection remain unresolved.',
+    notice: country
+      ? editionMatches
+        ? 'Column 2 listing reports only membership in the edition-pinned General Note 3(b) list. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.'
+        : 'Column 2 listing is unknown because the current edition differs from the reviewed General Note 3(b) source. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.'
+      : 'No country was requested. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.',
     qualificationNotice,
   };
 }

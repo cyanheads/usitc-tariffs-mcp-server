@@ -58,6 +58,7 @@ export function normalizedRows(rows: readonly TariffRecord[]): TariffRow[] {
     ...(row.htsno && { htsno: row.htsno }),
     indent: Number(row.indent),
     description: row.description,
+    ...(row.superior !== undefined && { superior: row.superior }),
     publishedRates: {
       ...(row.general !== undefined && { general: row.general }),
       ...(row.special !== undefined && { special: row.special }),

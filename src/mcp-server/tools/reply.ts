@@ -49,10 +49,12 @@ export function replySizeInBytes(
   enrichment: { totalCount?: number; notice?: string } = {},
 ): number {
   const content = formatSourceData(result);
-  const trailer = Object.entries(enrichment)
-    .map(([key, value]) =>
-      key === 'totalCount' ? `totalCount: ${String(value)}` : `notice: ${JSON.stringify(value)}`,
-    )
+  const trailer = [
+    enrichment.totalCount !== undefined &&
+      enrichmentTrailer.totalCount.render(enrichment.totalCount),
+    enrichment.notice !== undefined && enrichmentTrailer.notice.render(enrichment.notice),
+  ]
+    .filter(Boolean)
     .join('\n');
   if (trailer) content.push({ type: 'text', text: `\n\n${trailer}` });
   return new TextEncoder().encode(

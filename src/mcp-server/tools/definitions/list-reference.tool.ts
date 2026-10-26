@@ -142,15 +142,15 @@ export const listReferenceTool = tool('usitc_list_reference', {
       topic: input.topic,
       limit: input.limit,
     });
-    const response = await new TariffService(getUsitcService()).reference(
+    const { result, notice } = await new TariffService(getUsitcService()).reference(
       input.topic,
       input.limit,
       cursor,
       ctx,
     );
-    ctx.enrich.total(response.result.page.total);
-    if ('notice' in response && response.notice) ctx.enrich.notice(response.notice);
-    return response.result;
+    ctx.enrich.total(result.page.total);
+    if (notice) ctx.enrich.notice(notice);
+    return result;
   },
   format: formatSourceData,
 });

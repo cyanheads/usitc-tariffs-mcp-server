@@ -24,7 +24,7 @@ import {
 export const lookupDutyRateTool = tool('usitc_lookup_duty_rate', {
   title: 'Look up published base duty columns',
   description:
-    'Retrieve an exact eight-digit rate line or ten-digit statistical number with all published General, Special and Column 2 cells. Blank statistical cells inherit only from the matching eight-digit legal ancestor. Country comparisons retain all symbols and unknown membership; they do not establish qualification or select a column. Follow usitc_check_additional_duties for partial Chapter 99 research.',
+    'Retrieve an eight-digit rate line or exact ten-digit statistical number with all published General, Special and Column 2 cells. An explicit eight-digit row takes precedence; an absent one resolves only through a unique ten-digit source row, retaining its identity. Multiple suffixes stay unresolved. Blank statistical cells inherit only from the matching eight-digit legal ancestor. With countryCode, report edition-matched General Note 3(b) listing; Special-program membership stays unknown. Neither comparison establishes qualification or selects a column. Follow usitc_check_additional_duties for partial Chapter 99 research.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     code: z
@@ -38,10 +38,16 @@ export const lookupDutyRateTool = tool('usitc_lookup_duty_rate', {
   output: z.object({
     ...metadataShape,
     code: z.string().describe('Canonical requested exact identifier.'),
-    found: z.boolean().describe('Whether this exact published number exists.'),
+    found: z
+      .boolean()
+      .describe(
+        'Whether an exact source row or unique combined eight-digit relationship resolves.',
+      ),
     row: headingNodeSchema
       .optional()
-      .describe('Exact source row with executable parent and rate-source follow-ups.'),
+      .describe(
+        'Original published source row, including a unique combined row when resolving an absent eight-digit number.',
+      ),
     resolvedRates: resolvedRatesSchema
       .optional()
       .describe('All resolved duty columns when the exact number exists.'),
@@ -49,7 +55,7 @@ export const lookupDutyRateTool = tool('usitc_lookup_duty_rate', {
       .optional()
       .describe('Decoded nonblank Special cell, preserving unmatched text.'),
     countryAssessment: countryAssessmentSchema.describe(
-      'Explicitly unresolved membership, qualification and column choice.',
+      'Edition-pinned Column 2 listing with unresolved Special-program membership, qualification and column choice.',
     ),
     chapter99Pointers: z
       .object({

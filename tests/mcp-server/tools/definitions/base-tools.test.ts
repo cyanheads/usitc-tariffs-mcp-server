@@ -126,6 +126,112 @@ afterEach(async () => {
 });
 
 describe('base tariff tool contracts', () => {
+  it.each([
+    ['2026HTSRev21', 'listed'],
+    ['2026HTSRev22', 'unknown'],
+  ])('preserves GN3(b) listing and provenance on both surfaces for %s', async (release, status) => {
+    edition = release;
+    const response = await drive(
+      runToolContract(tools.duty, { code: '8507600010', countryCode: 'RU' }),
+    );
+    assertTwin(response);
+    expect(tools.duty.output.parse(response.structuredContent).countryAssessment).toMatchObject({
+      countryCode: 'RU',
+      column2Listing: {
+        status,
+        citation: 'General Note 3(b)',
+        sourceEdition: '2026HTSRev21',
+        sourceUrl:
+          'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
+      },
+      eligibility: 'not_determined',
+      columnSelection: 'not_determined',
+      membershipCoverage: 'unknown',
+    });
+  });
+
+  it('omits the GN3(b) comparison without country input on both surfaces', async () => {
+    edition = '2026HTSRev21';
+    const response = await drive(runToolContract(tools.duty, { code: '8507600010' }));
+    assertTwin(response);
+    expect(
+      tools.duty.output.parse(response.structuredContent).countryAssessment,
+    ).not.toHaveProperty('column2Listing');
+  });
+
+  it('resolves a combined row and exposes source identity on both duty surfaces', async () => {
+    rows = [
+      { htsno: '8505', indent: '0', description: 'Root' },
+      { htsno: '8505.90.75.01', indent: '1', description: 'Combined source', general: 'Free' },
+    ];
+    const response = await drive(runToolContract(tools.duty, { code: '85059075' }));
+    assertTwin(response);
+    expect(tools.duty.output.parse(response.structuredContent)).toMatchObject({
+      found: true,
+      code: '8505.90.75',
+      row: { htsno: '8505.90.75.01', sourceOrdinal: 1, rateLineCode: '8505.90.75' },
+      resolvedRates: {
+        general: { text: 'Free', sourceHtsno: '8505.90.75.01', state: 'published' },
+      },
+    });
+    const miss = await drive(runToolContract(tools.duty, { code: '8505907599' }));
+    assertTwin(miss);
+    expect(tools.duty.output.parse(miss.structuredContent)).toMatchObject({ found: false });
+  });
+
+  it('keeps section source metadata separate and preserves grouping through continuation', async () => {
+    rows = [
+      { indent: '2', superior: 'true', description: 'I. PRIMARY FORMS' },
+      { htsno: '3901', indent: '0', description: 'First heading' },
+      { htsno: '3901.10.00.00', indent: '1', description: 'Combined', general: 'Free' },
+    ];
+    const heading = await drive(runToolContract(tools.heading, { code: '3901', limit: 1 }));
+    assertTwin(heading);
+    const first = tools.heading.output.parse(heading.structuredContent);
+    expect(first.sections).toMatchObject([
+      { sourceOrdinal: 0, description: 'I. PRIMARY FORMS', superior: 'true' },
+    ]);
+    expect(first.nodes[0]).toMatchObject({ htsno: '3901', sourceOrdinal: 1 });
+    expect(first.nodes[0]).not.toHaveProperty('parentId');
+    const next = await drive(
+      runToolContract(tools.heading, { code: '3901', limit: 1, cursor: first.page.nextCursor }),
+    );
+    assertTwin(next);
+    expect(tools.heading.output.parse(next.structuredContent)).toMatchObject({
+      sections: first.sections,
+      nodes: [{ htsno: '3901.10.00.00' }],
+      page: { total: 2, returned: 1 },
+    });
+    rows.push(
+      { indent: '1', superior: 'true', description: 'II. WASTE AND SCRAP' },
+      { htsno: '3902', indent: '0', description: 'Second heading' },
+    );
+    const browse = await drive(runToolContract(tools.browse, { chapter: '39', limit: 1 }));
+    assertTwin(browse);
+    const page = tools.browse.output.parse(browse.structuredContent);
+    expect(page.headings).toEqual([
+      {
+        code: '3901',
+        description: 'First heading',
+        rateLineCount: 1,
+        statisticalLineCount: 1,
+        subchapter: 'I. PRIMARY FORMS',
+      },
+    ]);
+    const continuation = await drive(
+      runToolContract(tools.browse, { chapter: '39', limit: 1, cursor: page.page.nextCursor }),
+    );
+    assertTwin(continuation);
+    expect(tools.browse.output.parse(continuation.structuredContent).headings).toEqual([
+      {
+        code: '3902',
+        description: 'Second heading',
+        rateLineCount: 0,
+        statisticalLineCount: 0,
+        subchapter: 'II. WASTE AND SCRAP',
+      },
+    ]);
+  });
   it('advertises all five operations as read-only, idempotent and open-world', () => {
     for (const definition of Object.values(tools))
       expect(definition.annotations).toMatchObject({
@@ -732,11 +838,11 @@ describe('base tariff tool contracts', () => {
   });
 
   it('rejects node IDs from another scope and edition on both error surfaces', async () => {
-    const response = await drive(runToolContract(tools.heading, { code: '8507' }));
+    const response = await drive(runToolContract(tools.heading, { code: '850780' }));
     const result = tools.heading.output.parse(response.structuredContent);
     assertError(
       await drive(
-        runToolContract(tools.heading, { code: '85076000', nodeId: result.nodes[8]!.nodeId }),
+        runToolContract(tools.heading, { code: '85076000', nodeId: result.nodes[0]!.nodeId }),
       ),
       'invalid_cursor',
       'Repeat usitc_get_heading without cursor or nodeId to obtain current identifiers.',

@@ -5,7 +5,12 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { conflict, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { normalizeCode, normalizeCountryCode } from '../reference/reference-service.js';
-import { buildHeadingTree, type HeadingNode } from '../tariffs/heading-tree.js';
+import {
+  buildHeadingTree,
+  type HeadingNode,
+  type NodeFollowUp,
+  resolveDutyNode,
+} from '../tariffs/heading-tree.js';
 import { digestValue, packPage, readCursor } from '../tariffs/pagination.js';
 import type { Source, TariffRow } from '../usitc/types.js';
 import type { UsitcService } from '../usitc/usitc-service.js';
@@ -15,6 +20,7 @@ import {
   type Chapter99Index,
   findChapter99Evidence,
   getChapter99Fragments,
+  productCountry,
 } from './chapter99-index.js';
 
 const TOOL = 'usitc_check_additional_duties';
@@ -36,16 +42,16 @@ const ZERO_NOTICE =
 const UNMAPPED_NOTICE =
   'Matching Chapter 99 passages could not be linked safely to a heading. Call usitc_check_additional_duties with a returned noteId to inspect the full supporting passages.';
 
-/** One selected collection, or one source passage, with no duplicated evidence arrays. */
+/** One selected collection, or one source passage; limit and view arrive schema-validated with defaults. */
 export interface AdditionalDutyInput {
   candidateCode?: string | undefined;
   code: string;
   countryCode?: string | undefined;
   cursor?: string | undefined;
-  limit?: number | undefined;
+  limit: number;
   noteCursor?: string | undefined;
   noteId?: string | undefined;
-  view?: 'candidates' | 'evidence' | 'unmapped' | undefined;
+  view: 'candidates' | 'evidence' | 'unmapped';
 }
 type Arguments = {
   code: string;
@@ -83,7 +89,7 @@ type Evidence = Omit<
   sourceNodeId?: string;
   sourceScope?: 'selected_row' | 'ancestor' | 'inherited_rate_source';
   inheritedColumns?: string[];
-  followUp: FollowUp | { tool: 'usitc_get_heading'; arguments: { code: string; nodeId: string } };
+  followUp: FollowUp | NodeFollowUp;
 };
 type CompletedIndex = {
   charset: string;
@@ -97,6 +103,19 @@ type CompletedIndex = {
   notices: string[];
 };
 
+/** Legal ancestors of a node, nearest first, including unnamed rows. */
+function ancestorsOf(row: HeadingNode, nodes: readonly HeadingNode[]): HeadingNode[] {
+  const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+  const ancestors: HeadingNode[] = [];
+  for (
+    let parent = row.parentId ? byId.get(row.parentId) : undefined;
+    parent;
+    parent = parent.parentId ? byId.get(parent.parentId) : undefined
+  )
+    ancestors.push(parent);
+  return ancestors;
+}
+
 function normalize(input: AdditionalDutyInput): Arguments {
   const code = normalizeCode(input.code, [8, 10]);
   if (code.chapter === '99')
@@ -104,7 +123,7 @@ function normalize(input: AdditionalDutyInput): Arguments {
       reason: 'invalid_code',
     });
   const countryCode = normalizeCountryCode(input.countryCode);
-  const view = input.view ?? 'candidates';
+  const { limit, view } = input;
   const candidateCode = input.candidateCode?.trim()
     ? normalizeCode(input.candidateCode, [8]).code
     : undefined;
@@ -124,11 +143,6 @@ function normalize(input: AdditionalDutyInput): Arguments {
     );
   if (input.noteCursor?.trim() && !noteId)
     throw validationError('noteCursor requires its returned noteId.', {
-      reason: 'invalid_selector',
-    });
-  const limit = input.limit ?? 25;
-  if (!Number.isSafeInteger(limit) || limit < 1)
-    throw validationError('limit must be a positive safe integer.', {
       reason: 'invalid_selector',
     });
   return {
@@ -172,9 +186,7 @@ export class AdditionalDutiesService {
         ? await session.getRowsSnapshot(cursor.snapshotId.slice(cursor.snapshotId.indexOf('~') + 1))
         : await session.getHeading(code.heading);
       const nodes = buildHeadingTree(base.rows, code.heading);
-      const row = nodes.find(
-        (node) => node.htsno && normalizeCode(node.htsno).digits === code.digits,
-      );
+      const row = resolveDutyNode(nodes, code.digits);
       if (!row) return { base, nodes, row, completed: undefined };
       if (cached) return { base, nodes, row, completed: cached };
       const rates = await session.getChapter('99');
@@ -244,7 +256,8 @@ export class AdditionalDutiesService {
     }
     // Publish only an index whose complete source assembly passed the edition post-check.
     this.completed = completed;
-    const base8 = this.verifiedParent(row, nodes, code.digits);
+    const ancestors = ancestorsOf(row, nodes);
+    const base8 = row.rateLineCode ? normalizeCode(row.rateLineCode).digits : undefined;
     const found = findChapter99Evidence(completed.index, {
       code: code.digits,
       ...(base8 && { verifiedBase8: base8 }),
@@ -280,7 +293,7 @@ export class AdditionalDutiesService {
         followUp: follow({ noteId: passage.noteId }),
       });
     }
-    evidence.push(...this.footnotes(row, nodes, code.digits, code.heading, args.countryCode));
+    evidence.push(...this.footnotes(row, ancestors, code.digits, code.heading, args.countryCode));
     const grouped = new Map<string, Evidence[]>();
     for (const item of evidence) {
       if (!item.sourceCode) {
@@ -292,28 +305,55 @@ export class AdditionalDutiesService {
       entries.push(item);
       grouped.set(key, entries);
     }
+    const evidenceNoteIds = new Set(evidence.flatMap((item) => (item.noteId ? [item.noteId] : [])));
+    const countryLinks = Map.groupBy(
+      completed.index.links.filter(
+        (link) => evidenceNoteIds.has(link.listNoteId) || evidenceNoteIds.has(link.governingNoteId),
+      ),
+      (link) => link.heading,
+    );
     const candidates = [...grouped].map(([digits, items]) => {
+      const candidateCode = normalizeCode(digits).code;
       const rate = completed.rates.get(digits);
+      const headingCountry = rate ? productCountry(rate.description) : undefined;
+      const uncertainHeadingScope = Boolean(
+        rate && /\bproducts? of\b/i.test(rate.description) && !headingCountry,
+      );
+      const headingRelation =
+        !args.countryCode || !headingCountry
+          ? undefined
+          : args.countryCode === headingCountry
+            ? 'named'
+            : 'different_country';
+      const relations = [
+        ...items.map((item) => item.countryRelation),
+        ...(headingRelation ? [headingRelation] : []),
+      ];
+      const links = countryLinks.get(digits) ?? [];
+      const scopes = new Set(links.flatMap((link) => (link.countryCode ? [link.countryCode] : [])));
+      if (headingCountry) scopes.add(headingCountry);
       const conflictingCountryScope =
-        items.some((item) => item.countryRelation === 'named') &&
-        items.some((item) => item.countryRelation === 'different_country');
+        scopes.size > 1 || (relations.includes('named') && relations.includes('different_country'));
       const countryRelation = !args.countryCode
         ? ('not_requested' as const)
-        : conflictingCountryScope
+        : conflictingCountryScope ||
+            uncertainHeadingScope ||
+            links.some((link) => link.countryScopeUncertain)
           ? ('unknown' as const)
-          : items.some((item) => item.countryRelation === 'named')
+          : relations.includes('named')
             ? ('named' as const)
-            : items.every((item) => item.countryRelation === 'different_country')
+            : headingRelation === 'different_country' ||
+                items.every((item) => item.countryRelation === 'different_country')
               ? ('different_country' as const)
               : ('unknown' as const);
       return {
-        code: normalizeCode(digits).code,
+        code: candidateCode,
         headingResolved: rate !== undefined,
         ...(rate && { description: rate.description, publishedRates: rate.publishedRates }),
         sourceUrl: completed.ratesSourceUrl,
         evidenceCount: items.length,
         compilerNoticeCount: items.filter((item) => item.kind === 'compiler_notice').length,
-        evidenceFollowUp: follow({ view: 'evidence', candidateCode: normalizeCode(digits).code }),
+        evidenceFollowUp: follow({ view: 'evidence', candidateCode }),
         countryRelation,
         ...(countryRelation === 'different_country' && {
           countryNotice:
@@ -378,18 +418,18 @@ export class AdditionalDutiesService {
       snapshotId: `${completed.snapshotId}~${base.snapshotId}`,
       expiresAt: completed.expiresAt,
       limit: args.limit,
-      ...(cursor && { cursor }),
+      cursor,
     };
     const notice =
       candidates.length === 0 ? (unmapped.length ? UNMAPPED_NOTICE : ZERO_NOTICE) : undefined;
     if (args.noteId) {
       const noteId = args.noteId;
-      if (![...evidence, ...unmapped].some((item) => item.noteId === args.noteId))
+      if (![...evidence, ...unmapped].some((item) => item.noteId === noteId))
         throw validationError(
           'noteId is not supporting evidence for this commodity and country query. Repeat without noteId to obtain valid passage references.',
           { reason: 'note_not_found' },
         );
-      const fragments = getChapter99Fragments(completed.index, args.noteId);
+      const fragments = getChapter99Fragments(completed.index, noteId);
       const result = packPage({
         ...identity,
         items: fragments,
@@ -465,7 +505,7 @@ export class AdditionalDutiesService {
     const result = packPage({
       ...identity,
       items: candidates,
-      ...(notice && { notice }),
+      notice,
       build: (selected, page) => ({
         ...common,
         view: 'candidates' as const,
@@ -479,40 +519,20 @@ export class AdditionalDutiesService {
     return { result, notice };
   }
 
-  private verifiedParent(
-    row: HeadingNode,
-    nodes: HeadingNode[],
-    digits: string,
-  ): string | undefined {
-    if (digits.length !== 10) return undefined;
-    const byId = new Map(nodes.map((node) => [node.nodeId, node]));
-    let parent = row.parentId ? byId.get(row.parentId) : undefined;
-    while (parent) {
-      if (parent.htsno && normalizeCode(parent.htsno).digits === digits.slice(0, 8))
-        return digits.slice(0, 8);
-      parent = parent.parentId ? byId.get(parent.parentId) : undefined;
-    }
-    return undefined;
-  }
-
   private footnotes(
     row: HeadingNode,
-    nodes: HeadingNode[],
+    ancestors: readonly HeadingNode[],
     digits: string,
     heading: string,
     countryCode: string | undefined,
   ): Evidence[] {
-    const byId = new Map(nodes.map((node) => [node.nodeId, node]));
     const selected = new Map<
       string,
       { node: HeadingNode; scope: NonNullable<Evidence['sourceScope']>; columns: string[] }
     >();
     selected.set(row.nodeId, { node: row, scope: 'selected_row', columns: [] });
-    let parent = row.parentId ? byId.get(row.parentId) : undefined;
-    while (parent) {
-      selected.set(parent.nodeId, { node: parent, scope: 'ancestor', columns: [] });
-      parent = parent.parentId ? byId.get(parent.parentId) : undefined;
-    }
+    for (const node of ancestors)
+      selected.set(node.nodeId, { node, scope: 'ancestor', columns: [] });
     for (const entry of selected.values())
       for (const [column, resolved] of Object.entries(row.resolvedRates)) {
         if (resolved.state !== 'inherited' || resolved.sourceNodeId !== entry.node.nodeId) continue;
@@ -526,7 +546,7 @@ export class AdditionalDutiesService {
           ...new Set(
             [
               ...(footnote.value ?? '').matchAll(
-                /(?<![\w.])(?:99\d{2}\.\d{2}\.\d{2}|99\d{6})(?![\w.])/g,
+                /(?<![\w.])(?:99\d{2}\.\d{2}\.\d{2}|99\d{6})(?!\w|\.[\w.])/g,
               ),
             ].map((match) => normalizeCode(match[0], [8]).code),
           ),

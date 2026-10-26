@@ -15,7 +15,7 @@ import { listEnrichment, metadataShape, pageSchema, paginationInputShape } from 
 export const browseChapterTool = tool('usitc_browse_chapter', {
   title: 'Browse published HTS chapter headings',
   description:
-    'Browse numbered headings and complete eight-digit rate-line and ten-digit statistical counts for a chapter. Chapters 98 and 99 expose their actual published numbered entries rather than synthetic four-digit headings; subchapter grouping stays unavailable without a verified crosswalk. Reserved chapters can return a successful empty collection.',
+    'Browse numbered headings with complete distinct eight-digit rate-line relationships and independent ten-digit statistical counts. A unique combined ten-digit source row can establish an absent eight-digit relationship. Published subchapter titles group following headings when present. Chapters 98 and 99 expose actual published entries without synthetic four-digit headings; grouping is unavailable without sourced markers. Reserved chapters can return a successful empty collection.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     chapter: z.string().describe('Chapter 01–99, accepting one or two digits.'),
@@ -33,7 +33,9 @@ export const browseChapterTool = tool('usitc_browse_chapter', {
             rateLineCount: z
               .number()
               .int()
-              .describe('Distinct eight-digit rows in this published subtree.'),
+              .describe(
+                'Distinct verified eight-digit relationships, including unique combined rows, in this published subtree.',
+              ),
             statisticalLineCount: z
               .number()
               .int()

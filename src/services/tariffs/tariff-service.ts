@@ -15,7 +15,13 @@ import {
 } from '../reference/reference-service.js';
 import type { EditionResult, ReleaseRecord, RowsSnapshot } from '../usitc/types.js';
 import type { UsitcService } from '../usitc/usitc-service.js';
-import { buildHeadingTree, selectHeadingNodes, summarizeChapter } from './heading-tree.js';
+import {
+  buildHeadingTree,
+  headingSections,
+  resolveDutyNode,
+  selectHeadingNodes,
+  summarizeChapter,
+} from './heading-tree.js';
 import { digestValue, type PageCursor, packPage, validateCursor } from './pagination.js';
 
 /** Published decoder topics, without unsupported historical schedule selection. */
@@ -81,8 +87,8 @@ export class TariffService {
         snapshotId: snapshot.snapshotId,
         items: rows,
         limit,
-        ...(cursor && { cursor }),
-        ...(notice && { notice }),
+        cursor,
+        notice,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,
@@ -135,8 +141,8 @@ export class TariffService {
         snapshotId: snapshot.snapshotId,
         items: nodes,
         limit,
-        ...(cursor && { cursor }),
-        ...(guidance && { notice: guidance }),
+        cursor,
+        notice: guidance,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,
@@ -145,6 +151,7 @@ export class TariffService {
           found: nodes.length > 0,
           ...(scope[0] && { rootId: scope[0].nodeId }),
           nodes: selected,
+          sections: headingSections(snapshot.rows),
           page,
           ...(guidance && { guidance }),
         }),
@@ -161,7 +168,7 @@ export class TariffService {
         ? 'No numbered headings were published in this chapter. Call usitc_list_reference with topic chapters to inspect reserved and available chapters.'
         : undefined;
     const notices =
-      chapter === '98' || chapter === '99'
+      (chapter === '98' || chapter === '99') && headings.some((entry) => !entry.subchapter)
         ? [
             ...snapshot.notices,
             'The export provides no verified subchapter crosswalk; subchapter grouping is unavailable.',
@@ -177,8 +184,8 @@ export class TariffService {
         snapshotId: snapshot.snapshotId,
         items: headings,
         limit,
-        ...(cursor && { cursor }),
-        ...(notice && { notice }),
+        cursor,
+        notice,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,
@@ -196,9 +203,7 @@ export class TariffService {
     const normalized = normalizeCode(code, [8, 10]);
     const snapshot = await this.rows('heading', normalized.heading, undefined, ctx);
     const nodes = buildHeadingTree(snapshot.rows, normalized.heading);
-    const row = nodes.find(
-      (node) => node.htsno && normalizeCode(node.htsno).digits === normalized.digits,
-    );
+    const row = resolveDutyNode(nodes, normalized.digits);
     const specialPrograms =
       row?.resolvedRates.special.text === undefined
         ? undefined
@@ -256,7 +261,7 @@ export class TariffService {
       snapshotId: `reference:${topic}:${digest}`,
       items,
       limit,
-      ...(cursor && { cursor }),
+      cursor,
       build: (selected, page) => ({
         release: metadata.release,
         source: metadata.source,
@@ -266,7 +271,7 @@ export class TariffService {
         page,
       }),
     });
-    return { result };
+    return { result, notice: undefined };
   }
 
   private async releaseReference(limit: number, cursor: PageCursor | undefined, ctx: Context) {
@@ -316,9 +321,9 @@ export class TariffService {
         snapshotId: snapshot.snapshotId,
         items,
         limit,
-        ...(cursor && { cursor }),
+        cursor,
         expiresAt: snapshot.expiresAt,
-        ...(notice && { notice }),
+        notice,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,

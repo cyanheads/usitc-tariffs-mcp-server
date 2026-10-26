@@ -8,15 +8,67 @@ import {
   buildChapter99Index,
   findChapter99Evidence,
   getChapter99Fragments,
+  productCountry,
 } from '@/services/chapter99/chapter99-index.js';
 import {
   chapterNote,
   note18,
   note20,
   note31,
+  note31Following,
 } from '../../fixtures/chapter99/official-structure.js';
 
 const source = { release: '2026HTSRev21', sourceDigest: 'literal-response-byte-digest' };
+
+describe('Chapter 99 scanner CPU growth', () => {
+  it.each(['unclosed', 'prefixes', 'openers', 'line_break', 'whitespace_breaks'])(
+    'bounds %s scans over a 64-fold input span',
+    (shape) => {
+      const measurements: { size: number; cpuUs: number }[] = [];
+      for (const size of [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000]) {
+        const unit =
+          shape === 'unclosed'
+            ? '[Compiler’s note: ['
+            : shape === 'prefixes'
+              ? '9903.90.08..10 products of Canad '
+              : shape === 'openers'
+                ? '[[((Heading products of '
+                : shape === 'line_break'
+                  ? 'x'
+                  : ' \n\t';
+        const payload =
+          unit.repeat(Math.ceil(size / unit.length)).slice(0, size) +
+          (shape === 'line_break' ? '\n   ' : '');
+        const html = chapterNote(
+          1,
+          `<ul><li value="(a)">(a) Heading 9903.91.06 applies to products of China that are classified in the following 8-digit subheadings: ${payload}<ul><li value="(1)">(1) 8507.60.00</li></ul></li></ul>`,
+        );
+        // Warm the same shape before measuring this thread; scheduler delays are excluded.
+        buildChapter99Index(html, source);
+        const started = process.threadCpuUsage();
+        for (let iteration = 0; iteration < 3; iteration++) {
+          const index = buildChapter99Index(html, source);
+          expect(index.mentions.has('85076000')).toBe(true);
+          expect(index.links.length).toBe(shape === 'unclosed' ? 0 : 1);
+          expect(productCountry(payload)).toBeUndefined();
+        }
+        const used = process.threadCpuUsage(started);
+        const cpuUs = used.user + used.system;
+        measurements.push({ size, cpuUs });
+        // Check the absolute bound before trying the next doubled input.
+        expect(cpuUs).toBeLessThan(500_000);
+      }
+      expect(measurements.at(-1)!.cpuUs / Math.max(1, measurements[0]!.cpuUs)).toBeLessThan(256);
+      console.info(
+        JSON.stringify({
+          runtime: process.versions.bun ? `bun ${process.versions.bun}` : process.version,
+          shape,
+          measurements,
+        }),
+      );
+    },
+  );
+});
 
 describe('Chapter 99 failure contracts', () => {
   it.each([
@@ -43,6 +95,127 @@ describe('Chapter 99 failure contracts', () => {
 });
 
 describe('bounded legal-link grammars', () => {
+  it.each([
+    [
+      '(b)',
+      '(a)',
+      '(1)',
+      'Heading 9903.91.06 applies to products of China that are classified in the following 8-digit subheadings:',
+    ],
+    [
+      '(a)',
+      '(a)',
+      '(2)',
+      'Heading 9903.91.06 applies to products of China that are classified in the following 8-digit subheadings:',
+    ],
+    [
+      '(a)',
+      '(a)',
+      '(1)',
+      'Heading 9903.91.06 and heading 9903.91.05 apply to products of China that are classified in the following 8-digit subheadings:',
+    ],
+    [
+      '(a)',
+      '(a)',
+      '(1)',
+      'Heading 9903.91.06 applies to products of China other than products classified in the following 8-digit subheadings:',
+    ],
+    [
+      '(a)',
+      '(a)',
+      '(1)',
+      'Compiler’s note: Heading 9903.91.06 applies to products of China that are classified in the following 8-digit subheadings:',
+    ],
+  ])(
+    'rejects conflicting labels or unreviewed governor %s/%s/%s/%s',
+    (attribute, label, itemAttribute, opening) => {
+      const index = buildChapter99Index(
+        chapterNote(
+          1,
+          `<ul><li value="${attribute}">${label} ${opening}<ul><li value="${itemAttribute}">(1) 8507.60.00</li></ul></li></ul>`,
+        ),
+        source,
+      );
+      expect(index.links).toEqual([]);
+      expect(
+        findChapter99Evidence(index, { code: '85076000' }).evidence.some(
+          (item) => item.relation === 'inclusion_candidate',
+        ),
+      ).toBe(false);
+    },
+  );
+  it('does not reach into an unsupported nested numbered item through the outer governor', () => {
+    const index = buildChapter99Index(
+      chapterNote(
+        1,
+        '<ul><li value="(a)">(a) Heading 9903.91.06 applies to products of China that are classified in the following 8-digit subheadings:<ul><li value="(1)">(1) Outer text<ul><li value="(1)">(1) 8507.60.00</li></ul></li></ul></li></ul>',
+      ),
+      source,
+    );
+    expect(index.links).toEqual([]);
+  });
+  it.each([
+    ['85414200', '99039102'],
+    ['87024031', '99039103'],
+    ['38180000', '99039105'],
+    ['85076000', '99039106'],
+    ['81019400', '99039111'],
+  ])('links captured following-list product %s only to its governor %s', (code, heading) => {
+    const index = buildChapter99Index(note31Following, source);
+    const result = findChapter99Evidence(index, { code, countryCode: 'CA' });
+    expect(result.evidence.filter((item) => item.relation === 'inclusion_candidate')).toEqual([
+      expect.objectContaining({ sourceCode: heading, countryRelation: 'different_country' }),
+    ]);
+    const governor = result.evidence.find((item) => item.role === 'governing')!;
+    expect(
+      getChapter99Fragments(index, governor.noteId)
+        .map((item) => item.text)
+        .join(''),
+    ).toContain('effective with respect to goods');
+    if (heading === '99039105')
+      expect(index.passages.find((item) => item.noteId === governor.noteId)!.locatorStatus).toBe(
+        'ambiguous',
+      );
+    expect(index.coverage.status).toBe('partial');
+  });
+  it.each(['6307909842', '6307909850'])(
+    'retains the descriptive .07 item %s and governor as qualified context',
+    (code) => {
+      const result = findChapter99Evidence(buildChapter99Index(note31Following, source), {
+        code,
+        countryCode: 'CN',
+      });
+      expect(result.evidence).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sourceCode: '99039107',
+            role: 'governing',
+            relation: 'context_only',
+          }),
+          expect.objectContaining({ sourceCode: '99039107', role: 'product_list' }),
+        ]),
+      );
+      expect(result.evidence.some((item) => item.relation === 'inclusion_candidate')).toBe(false);
+    },
+  );
+  it.each([
+    ['Articles the product of Canada as provided in this heading.', 'CA'],
+    ['Products of China that are classified in the following subheadings.', 'CN'],
+    [
+      'Effective with respect to entries on or after January 1, 2026, articles the product of China, as provided for in subdivision (g) of U.S. note 31 to this subchapter',
+      'CN',
+    ],
+    ['Parts of passenger vehicles and light trucks of the United Kingdom.', undefined],
+    ['Except for products described elsewhere, articles the product of Vietnam.', undefined],
+    ['Products of Canada and China.', undefined],
+    ['Products of Canada or Mexico.', undefined],
+    ['Products of Canada; products of Vietnam.', undefined],
+    ['If eligible, products of Canada.', undefined],
+    ['Products of Canada other than eligible articles.', undefined],
+    ['Products of China and products of Canada.', undefined],
+  ])('recognizes only reviewed single positive country scope: %s', (text, country) =>
+    expect(productCountry(text!)).toBe(country),
+  );
   it('links note 20(b) only to the positive heading and keeps governing and exclusion context reachable', () => {
     const index = buildChapter99Index(note20, source);
     const result = findChapter99Evidence(index, { code: '01012100', countryCode: 'CN' });
@@ -226,6 +399,16 @@ describe('bounded legal-link grammars', () => {
 });
 
 describe('exact code matching and precision', () => {
+  it('accepts complete sentence-final tokens while rejecting malformed continuations', () => {
+    const index = buildChapter99Index(
+      chapterNote(
+        1,
+        '9903.90.08. 7208.10.15. 7208.10.15.00. x9903.90.09. 9903.90.10.1 9903.90.11..10 9903.90.121',
+      ),
+      source,
+    );
+    expect([...index.mentions.keys()]).toEqual(['99039008', '72081015', '7208101500']);
+  });
   it('recognizes dotted and undotted tokens but never substrings or expanded ranges', () => {
     const index = buildChapter99Index(
       chapterNote(
@@ -274,6 +457,36 @@ describe('exact code matching and precision', () => {
 });
 
 describe('passages and fragments', () => {
+  it('links only directly owned numbered code-only following-list entries and retains the complete governor', () => {
+    const html = chapterNote(
+      1,
+      '<ul><li value="(a)">(a) Heading 9903.91.06 applies to products of China that are classified in the following 8-digit subheadings:<ul><li value="(1)">(1) 8507.60.00</li><li value="(2)">(2) Other than 8505.11.00</li><li value="(3)">(3) 2504.10.10 and 2504.10.50</li></ul></li><li value="(b)">(b) Other scope<ul><li value="(1)">(1) 8501.10.00</li></ul></li></ul>',
+    );
+    const index = buildChapter99Index(html, source);
+    const result = findChapter99Evidence(index, { code: '85076000', countryCode: 'CN' });
+    expect(result.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceCode: '99039106',
+          relation: 'inclusion_candidate',
+          countryRelation: 'named',
+        }),
+        expect.objectContaining({ role: 'governing', relation: 'context_only' }),
+      ]),
+    );
+    const governor = result.evidence.find((item) => item.role === 'governing')!;
+    expect(
+      getChapter99Fragments(index, governor.noteId)
+        .map((item) => item.text)
+        .join(''),
+    ).toContain('following 8-digit subheadings:');
+    for (const code of ['85051100', '25041010', '85011000'])
+      expect(
+        findChapter99Evidence(index, { code }).evidence.some(
+          (item) => item.relation === 'inclusion_candidate',
+        ),
+      ).toBe(false);
+  });
   it('preserves every nested text node once, source uncertainty, entities, row tabs and block breaks', () => {
     const html = chapterNote(
       1,

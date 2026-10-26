@@ -7,6 +7,9 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { conflict, internalError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { replySizeInBytes } from '../../mcp-server/tools/reply.js';
 
+const CURSOR_TTL_MS = 15 * 60_000;
+const REPLY_BUDGET_BYTES = 24_000;
+
 /** Whole-collection counts and an executable continuation token. */
 export interface Page {
   budgetLimited?: boolean;
@@ -60,7 +63,7 @@ export function readCursor(
     throw validationError('Cursor does not match this tool and its normalized arguments.', {
       reason: 'invalid_cursor',
     });
-  if (parsed.data.expiresAt <= now || parsed.data.expiresAt > now + 15 * 60_000)
+  if (parsed.data.expiresAt <= now || parsed.data.expiresAt > now + CURSOR_TTL_MS)
     throw conflict('Cursor expired. Repeat the original call without a cursor.', {
       reason: 'cursor_expired',
     });
@@ -92,10 +95,10 @@ export function packPage<T, R>(options: {
   snapshotId: string;
   items: readonly T[];
   limit: number;
-  cursor?: PageCursor;
+  cursor?: PageCursor | undefined;
   expiresAt?: number;
   build: (items: T[], page: Page) => R;
-  notice?: string;
+  notice?: string | undefined;
 }): R {
   validateCursor(options.cursor, options);
   const offset = options.cursor?.offset ?? 0;
@@ -104,7 +107,7 @@ export function packPage<T, R>(options: {
       reason: 'invalid_cursor',
     });
   const effectiveLimit = Math.min(options.limit, 100);
-  const expiresAt = options.cursor?.expiresAt ?? options.expiresAt ?? Date.now() + 15 * 60_000;
+  const expiresAt = options.cursor?.expiresAt ?? options.expiresAt ?? Date.now() + CURSOR_TTL_MS;
   const enrichment = {
     totalCount: options.items.length,
     ...(options.notice && { notice: options.notice }),
@@ -136,17 +139,15 @@ export function packPage<T, R>(options: {
   };
   let count = Math.min(effectiveLimit, options.items.length - offset);
   let result = build(count, false);
-  while (replySizeInBytes(result, enrichment) > 24_000 && count > 0) {
+  while (replySizeInBytes(result, enrichment) > REPLY_BUDGET_BYTES) {
+    // A page must advance by at least one whole item; an empty collection must fit as-is.
+    if (count <= 1)
+      throw internalError(
+        'One complete source item exceeds the MCP reply budget; a narrower detail selector is required.',
+        { reason: 'reply_item_too_large', retryable: false },
+      );
     count--;
     result = build(count, true);
   }
-  if (
-    (count === 0 && offset < options.items.length) ||
-    replySizeInBytes(result, enrichment) > 24_000
-  )
-    throw internalError(
-      'One complete source item exceeds the MCP reply budget; a narrower detail selector is required.',
-      { reason: 'reply_item_too_large', retryable: false },
-    );
   return result;
 }

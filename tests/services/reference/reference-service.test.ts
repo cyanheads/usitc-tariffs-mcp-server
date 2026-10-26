@@ -4,6 +4,7 @@
  */
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
+import { column2Countries } from '@/services/reference/program-data.js';
 import {
   assessCountry,
   listChapterReferences,
@@ -97,6 +98,20 @@ describe('HTS identifiers and countries', () => {
 });
 
 describe('reviewed reference facts', () => {
+  it('maps every country in the complete GN3(b) paragraph to its assigned ISO identifier', () => {
+    expect(column2Countries).toEqual([
+      ['BY', 'Republic of Belarus'],
+      ['CU', 'Cuba'],
+      ['KP', 'North Korea'],
+      ['RU', 'Russian Federation'],
+    ]);
+    expect(column2Countries.map(([code]) => normalizeCountryCode(code))).toEqual([
+      'BY',
+      'CU',
+      'KP',
+      'RU',
+    ]);
+  });
   it('contains every GN3 symbol as a distinct literal including suffixes', () => {
     const programs = listProgramReferences();
     expect(programs.map((program) => program.symbol)).toEqual([
@@ -184,6 +199,72 @@ describe('reviewed reference facts', () => {
 });
 
 describe('Special clause interpretation', () => {
+  it.each([
+    ['BY', 'listed'],
+    ['CU', 'listed'],
+    ['KP', 'listed'],
+    ['RU', 'listed'],
+    ['CN', 'not_listed'],
+  ])('reports the complete pinned GN3(b) listing for %s', (country, status) => {
+    const parsed = parseSpecialCell('Free (S)', country);
+    expect(assessCountry(parsed, country, '2026HTSRev21')).toMatchObject({
+      column2Listing: {
+        status,
+        citation: 'General Note 3(b)',
+        sourceEdition: '2026HTSRev21',
+        sourceUrl:
+          'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
+      },
+    });
+  });
+  it.each(['RU', 'CN'])(
+    'retains pinned provenance with unknown listing on edition mismatch for %s',
+    (country) => {
+      const parsed = parseSpecialCell('', country);
+      expect(assessCountry(parsed, country, '2026HTSRev22')).toMatchObject({
+        decoderSourceEdition: '2026HTSRev21',
+        editionMatches: false,
+        column2Listing: {
+          status: 'unknown',
+          citation: 'General Note 3(b)',
+          sourceEdition: '2026HTSRev21',
+          sourceUrl:
+            'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
+        },
+      });
+    },
+  );
+  it('omits listing without a requested country and rejects invalid countries', () => {
+    const parsed = parseSpecialCell('');
+    for (const country of [undefined, '', '  '])
+      expect(assessCountry(parsed, country, '2026HTSRev21')).not.toHaveProperty('column2Listing');
+    expect(assessCountry(parsed, ' ru ', '2026HTSRev21')).toMatchObject({
+      countryCode: 'RU',
+      column2Listing: { status: 'listed' },
+    });
+    expect(() => assessCountry(parsed, 'ZZ', '2026HTSRev21')).toThrowError(
+      expect.objectContaining({ data: { reason: 'invalid_country' } }),
+    );
+  });
+  it('keeps country assessment independent of recognized Special symbols and empty clauses', () => {
+    for (const text of ['', 'Free (S, S+)']) {
+      const parsed = parseSpecialCell(text, 'RU');
+      expect(assessCountry(parsed, 'RU', '2026HTSRev21')).toMatchObject({
+        countryCode: 'RU',
+        eligibility: 'not_determined',
+        columnSelection: 'not_determined',
+        membershipCoverage: 'unknown',
+        decoderSourceEdition: '2026HTSRev21',
+        editionMatches: true,
+        recognizedSymbolCount: text ? 2 : 0,
+        notice: expect.any(String),
+        qualificationNotice: expect.any(String),
+      });
+      expect(parsed.decoder.sourceEdition).toBe('2026HTSRev21');
+      for (const program of parsed.clauses.flatMap((clause) => clause.programs))
+        expect(program.countryRelation).toBe('unknown');
+    }
+  });
   it('preserves exact source slices and each suffix across multiple balanced clauses', () => {
     const text = 'Free (A*, A+, E*, P+, S+) 2.5% (AU, JP)';
     const parsed = parseSpecialCell(text, 'CA');

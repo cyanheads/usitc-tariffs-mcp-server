@@ -1,6 +1,6 @@
 # usitc-tariffs-mcp-server - Directory Structure
 
-Generated on: 2026-10-25 12:18:52
+Generated on: 2026-10-26 03:42:24
 
 ```text
 usitc-tariffs-mcp-server/
@@ -36,6 +36,8 @@ usitc-tariffs-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -182,6 +184,8 @@ usitc-tariffs-mcp-server/
 │   │           └── check-additional-duties.tool.test.ts
 │   ├── prompts/
 │   ├── resources/
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── services/
 │   │   ├── chapter99/
 │   │   │   └── chapter99-index.test.ts
@@ -210,7 +214,9 @@ usitc-tariffs-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

@@ -1,10 +1,10 @@
-# Developer Protocol
+# Agent Protocol
 
-**Server:** usitc-tariffs-mcp-server
+**Server:** @cyanheads/usitc-tariffs-mcp-server
 **Version:** 0.1.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.16`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -47,8 +47,8 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 Six read-only tools are registered in `src/index.ts`; no resources or prompts. See `docs/design.md` for domain decisions and `README.md` for caller contracts.
 
 - `usitc_search_hts` returns flat matches, not resolved ancestry or rates.
-- `usitc_get_heading` reconstructs the complete containing heading before selecting nodes. Unnumbered parents participate in ancestry.
-- `usitc_lookup_duty_rate` retains all base columns; blank statistical cells inherit only from their matching eight-digit legal ancestor.
+- `usitc_get_heading` reconstructs the complete containing heading before selecting nodes. Unnumbered parents participate in ancestry; verified subchapter titles remain separate source metadata.
+- `usitc_lookup_duty_rate` retains all base columns; blank statistical cells inherit only from their matching eight-digit legal ancestor. An absent eight-digit row resolves only through a unique published ten-digit row, preserving source identity. GN3(b) country listing is edition-pinned and never selects a rate.
 - `usitc_check_additional_duties` is permanently partial research. Keep unknown and different-country evidence visible; empty results never establish clearance.
 - `usitc_list_reference` decodes edition-pinned symbols without asserting country membership or qualification.
 - `usitc_browse_chapter` counts complete published subtrees before pagination.
@@ -143,7 +143,7 @@ See `docs/tree.md` for the generated tree.
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Development skills live in `framework-skills/`; read them when a task matches, or run `bun run list-skills` for the registry. Root `skills/` is a separate, opt-in tree for agents that install and use the server. Author it with `add-skill` only when a reusable tool chain earns its place; maintenance never creates it. Published skills reach plugin installs, npm, Docker, and MCPB; serving them over MCP additionally requires `createApp({ skills: 'skills' })`. This server does not publish or serve skills.
 
 **Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
@@ -157,6 +157,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author and validate a skill published in root `skills/` for agents that use the server |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -204,7 +205,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Packaging checks: env-var parity, MCPB exclusions, plugin manifests, and published skills (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -215,6 +216,8 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create the GitHub Release from an annotated tag — enforces the `v<VERSION>: <subject>` title, attaches the `.mcpb` bundle |
+| `bun run publish-mcp` | Publish `server.json` to the MCP Registry (GitHub PAT read from the macOS keychain) |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
@@ -222,7 +225,9 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`mcpb pack` reads `.mcpbignore`, not `.gitignore`. Keep excluded root paths anchored (`/docs/`, never `docs/`) so dependency paths remain intact. Root `skills/` ships when present. The cleaner also strips node-gyp generator output and build-only framework files; compiled native addons remain. Packaging lint checks those exclusions and built bundles.
+
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. After packing, `scripts/clean-mcpb.ts` prunes dev dependencies and strips dependency-shipped agent docs, platform-specific bindings, node-gyp generator output, and build-only package files. Compiled native addons stay; DuckDB's platform bindings are omitted and its optional peer reports an install hint when needed. MCPB serves stdio; HTTP deployments use the application directly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -291,6 +296,8 @@ import { getUsitcService } from './services/usitc/usitc-service.js';
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] Root `plugin.json` and `mcp.json` follow Agent Plugins 1.0.0, use the unscoped server name and package metadata, and carry fixed stdio configuration only. Preserve both overlays and the Codex `mcpServers` pointer for forwarding user environment variables.
+- [ ] New root development paths have anchored `.mcpbignore` exclusions; published root skills pass packaging validation and live field verification.
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`

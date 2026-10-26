@@ -149,6 +149,12 @@ export const resolvedRatesSchema = z.object({
 export const headingNodeSchema = z
   .object({
     ...tariffRowShape,
+    rateLineCode: z
+      .string()
+      .optional()
+      .describe(
+        'Verified eight-digit relationship from an explicit legal row or a unique combined source row; never an invented ancestor.',
+      ),
     parentId: z.string().optional().describe('Immediate legal parent, including unnamed rows.'),
     parentFollowUp: nodeFollowUpSchema
       .optional()
@@ -216,11 +222,28 @@ export const parsedSpecialSchema = z.object({
 /** Country comparison retains uncertainty and does not select a rate column. */
 export const countryAssessmentSchema = z.object({
   countryCode: z.string().optional().describe('Normalized requested ISO alpha-2 country.'),
+  column2Listing: z
+    .object({
+      status: z
+        .enum(['listed', 'not_listed', 'unknown'])
+        .describe('Membership in the complete reviewed GN3(b) list; unknown on edition mismatch.'),
+      citation: z.string().describe('Official General Note citation for the country list.'),
+      sourceEdition: z
+        .string()
+        .describe('Reviewed country-list edition, never relabeled with the live edition.'),
+      sourceUrl: z.string().describe('Edition-pinned official country-list source.'),
+    })
+    .optional()
+    .describe(
+      'Published Column 2 country listing when countryCode is supplied; does not select a rate.',
+    ),
   eligibility: z.literal('not_determined').describe('No program eligibility determination.'),
   columnSelection: z
     .literal('not_determined')
     .describe('No General versus Column 2 determination.'),
-  membershipCoverage: z.literal('unknown').describe('Country membership is unverified.'),
+  membershipCoverage: z
+    .literal('unknown')
+    .describe('Special-program country membership is unverified.'),
   decoderSourceEdition: z.string().describe('Reviewed decoder edition.'),
   editionMatches: z
     .boolean()
