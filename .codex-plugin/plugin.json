@@ -10,7 +10,7 @@
   "homepage": "https://github.com/cyanheads/usitc-tariffs-mcp-server#readme",
   "repository": "https://github.com/cyanheads/usitc-tariffs-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "bun", "stdio", "streamable-http", "cyanheads", "usitc", "htsus", "tariffs", "customs", "trade"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "bun", "stdio", "streamable-http", "cyanheads", "usitc", "htsus", "tariffs", "customs", "trade", "harmonized-tariff-schedule", "hts", "duty-rates"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "usitc-tariffs-mcp-server",
