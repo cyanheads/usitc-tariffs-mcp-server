@@ -57,7 +57,9 @@ describe('published heading hierarchy', () => {
         { indent, description, superior: 'true' },
         { htsno, indent: '0', description: 'Published root' },
       ]);
-      expect(headingSections(rows)).toEqual([rows[0]]);
+      const { nodeId: _nodeId, ...marker } = rows[0]!;
+      expect(headingSections(rows)).toEqual([marker]);
+      expect(headingSections(rows)[0]).not.toHaveProperty('nodeId');
       const nodes = buildHeadingTree(rows, htsno!.slice(0, 4));
       expect(nodes.map((node) => node.sourceOrdinal)).toEqual([1]);
       expect(summarizeChapter(rows, chapter!)[0]).toMatchObject({
@@ -122,11 +124,10 @@ describe('published heading hierarchy', () => {
       expect(row).toMatchObject({
         nodeId: 'edition-A:fixture:1',
         sourceOrdinal: 1,
+        htsno: '8505.90.75.01',
         rateLineCode: '8505.90.75',
-        resolvedRates: {
-          general: { state: 'published', text: 'Free', sourceHtsno: '8505.90.75.01' },
-        },
       });
+      expect(row!.resolvedRates.general).toEqual({ state: 'published', text: 'Free' });
       expect(row).not.toHaveProperty('parentId', 'invented');
     }
   });
@@ -189,19 +190,33 @@ describe('published heading hierarchy', () => {
         column2: { state: 'inherited', text: '35%' },
       },
     });
-    expect(nodes[5]!.resolvedRates).toMatchObject({
-      general: { state: 'published', text: '1.2%', sourceNodeId: 'edition-A:fixture:5' },
-      special: { state: 'inherited' },
+    const rateSource = {
+      sourceNodeId: 'edition-A:fixture:2',
+      sourceHtsno: '8507.60.00',
+      sourceFollowUp: {
+        tool: 'usitc_get_heading',
+        arguments: { code: '8507', nodeId: 'edition-A:fixture:2' },
+      },
+    };
+    expect(nodes[2]!.resolvedRates).toEqual({
+      general: { state: 'published', text: '3.4%' },
+      special: { state: 'published', text: 'Free (A*, AU) 2% (ZZ)' },
+      column2: { state: 'published', text: '35%' },
+    });
+    expect(nodes[4]!.resolvedRates).toEqual({
+      general: { state: 'inherited', text: '3.4%', ...rateSource },
+      special: { state: 'inherited', text: 'Free (A*, AU) 2% (ZZ)', ...rateSource },
+      column2: { state: 'inherited', text: '35%', ...rateSource },
+    });
+    expect(nodes[5]!.resolvedRates).toEqual({
+      general: { state: 'published', text: '1.2%' },
+      special: { state: 'inherited', text: 'Free (A*, AU) 2% (ZZ)', ...rateSource },
       column2: { state: 'published', text: '40%' },
     });
     expect(nodes[8]!.resolvedRates).toEqual({
       general: { state: 'not_published' },
       special: { state: 'not_published' },
       column2: { state: 'not_published' },
-    });
-    expect(nodes[4]!.resolvedRates.general.sourceFollowUp).toEqual({
-      tool: 'usitc_get_heading',
-      arguments: { code: '8507', nodeId: 'edition-A:fixture:2' },
     });
   });
 
@@ -214,6 +229,8 @@ describe('published heading hierarchy', () => {
       2, 3, 4, 5,
     ]);
     expect(selectHeadingNodes(nodes, '850799')).toEqual([]);
+    expect(selectHeadingNodes(nodes, '8507600010').map((node) => node.sourceOrdinal)).toEqual([4]);
+    expect(selectHeadingNodes(nodes, '8507600099')).toEqual([]);
     expect(summarizeChapter(normalizedRows(baseRows), '85')).toEqual([
       {
         code: '8507',
@@ -274,6 +291,33 @@ describe('published heading hierarchy', () => {
     );
     expect(nodes[1]!.parentId).toBe('edition-A:fixture:0');
     expect(nodes[2]!.resolvedRates.general).toEqual({ state: 'not_published' });
+  });
+
+  it('selects a ten-digit node with every indented descendant and never its eight-digit parent', () => {
+    const nodes = buildHeadingTree(
+      normalizedRows([
+        { htsno: '8507', indent: '0', description: 'Root' },
+        { htsno: '8507.60.00', indent: '1', description: 'Rate line', general: '3.4%' },
+        { htsno: '8507.60.00.30', indent: '2', description: 'Statistical' },
+        { indent: '3', description: 'Unnamed child', superior: 'true' },
+        { indent: '4', description: 'Unnamed grandchild' },
+        { htsno: '8507.60.00.40', indent: '2', description: 'Sibling' },
+      ]),
+      '8507',
+    );
+    const selected = selectHeadingNodes(nodes, '8507600030');
+    expect(selected.map((node) => node.sourceOrdinal)).toEqual([2, 3, 4]);
+    expect(selected.map((node) => node.parentId)).toEqual([
+      'edition-A:fixture:1',
+      'edition-A:fixture:2',
+      'edition-A:fixture:3',
+    ]);
+    expect(selected[0]).toMatchObject({ rateLineCode: '8507.60.00' });
+    expect(selected[0]!.resolvedRates.general).toMatchObject({
+      state: 'inherited',
+      sourceHtsno: '8507.60.00',
+    });
+    expect(selectHeadingNodes(nodes, '8507600099')).toEqual([]);
   });
 
   it.each([

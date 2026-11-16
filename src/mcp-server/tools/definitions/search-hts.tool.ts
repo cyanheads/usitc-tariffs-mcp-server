@@ -4,8 +4,13 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { normalizeSearchQuery } from '../../../services/reference/reference-service.js';
-import { readCursor } from '../../../services/tariffs/pagination.js';
+import {
+  CODE_PREFIX_INPUT,
+  normalizeCodePrefix,
+  normalizeSearchQuery,
+  QUERY_INPUT,
+} from '../../../services/reference/reference-service.js';
+import { pageNotice, readCursor } from '../../../services/tariffs/pagination.js';
 import { TariffService } from '../../../services/tariffs/tariff-service.js';
 import { getUsitcService } from '../../../services/usitc/usitc-service.js';
 import { enrichmentTrailer, formatSourceData } from '../reply.js';
@@ -14,25 +19,36 @@ import {
   metadataShape,
   pageSchema,
   paginationInputShape,
-  tariffRowShape,
+  sourceRowShape,
 } from '../schemas.js';
 
 /** Search never invents hierarchy or resolves statistical blank cells. */
 export const searchHtsTool = tool('usitc_search_hts', {
   title: 'Search published HTS classifications',
   description:
-    'Search published USITC descriptions or complete HTS code prefixes in source order. Matches are flat published rows with unresolved rates; call usitc_get_heading for legal ancestry and usitc_lookup_duty_rate for exact base rate columns. Follow nextCursor with identical arguments for all remaining matches.',
+    'Search published USITC descriptions or complete HTS code prefixes in source order. codePrefix keeps only matches under a chapter or code before counting and paging. Matches are flat published rows with unresolved rates; call usitc_get_heading for legal ancestry and usitc_lookup_duty_rate for exact base rate columns. Follow nextCursor with identical arguments for all remaining matches.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
       .string()
-      .min(1)
+      .regex(QUERY_INPUT.pattern, QUERY_INPUT.message)
       .describe('Nonblank commodity text or an HTS code prefix; preserve leading zeros.'),
-    ...paginationInputShape,
+    codePrefix: z
+      .string()
+      .regex(CODE_PREFIX_INPUT.pattern, CODE_PREFIX_INPUT.message)
+      .optional()
+      .describe(
+        'Keep only matches whose published number starts with this two-digit chapter or four-, six- or eight-digit code, bare or dotted; blank means omitted.',
+      ),
+    ...paginationInputShape(25),
   }),
   output: z.object({
     ...metadataShape,
     query: z.string().describe('Normalized query actually sent to USITC.'),
+    codePrefix: z
+      .string()
+      .optional()
+      .describe('Canonical code prefix applied before counting; absent when none was supplied.'),
     context: z
       .literal('flat_search_matches')
       .describe('Flat matches without reconstructed ancestry.'),
@@ -40,7 +56,7 @@ export const searchHtsTool = tool('usitc_search_hts', {
       .array(
         z
           .object({
-            ...tariffRowShape,
+            ...sourceRowShape,
             ratesResolved: z
               .literal(false)
               .describe('Published cells have not been resolved through ancestry.'),
@@ -77,15 +93,22 @@ export const searchHtsTool = tool('usitc_search_hts', {
   ],
   async handler(input, ctx) {
     const query = normalizeSearchQuery(input.query);
-    const cursor = readCursor(input.cursor, 'usitc_search_hts', { query, limit: input.limit });
+    const codePrefix = normalizeCodePrefix(input.codePrefix);
+    const cursor = readCursor(input.cursor, 'usitc_search_hts', {
+      query,
+      ...(codePrefix && { codePrefix }),
+      limit: input.limit,
+    });
     const { result, notice } = await new TariffService(getUsitcService()).search(
       query,
+      codePrefix,
       input.limit,
       cursor,
       ctx,
     );
     ctx.enrich.total(result.page.total);
-    if (notice) ctx.enrich.notice(notice);
+    const message = pageNotice(notice, input.limit);
+    if (message) ctx.enrich.notice(message);
     return result;
   },
   format: formatSourceData,

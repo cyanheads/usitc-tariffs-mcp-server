@@ -4,8 +4,8 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { normalizeCode } from '../../../services/reference/reference-service.js';
-import { readCursor } from '../../../services/tariffs/pagination.js';
+import { CODE_INPUT, normalizeCode } from '../../../services/reference/reference-service.js';
+import { pageNotice, readCursor } from '../../../services/tariffs/pagination.js';
 import { TariffService } from '../../../services/tariffs/tariff-service.js';
 import { getUsitcService } from '../../../services/usitc/usitc-service.js';
 import { enrichmentTrailer, formatSourceData } from '../reply.js';
@@ -15,26 +15,27 @@ import {
   metadataShape,
   pageSchema,
   paginationInputShape,
-  tariffRowShape,
+  sourceRowShape,
 } from '../schemas.js';
 
 /** Reconstruct before filtering and expose executable parent/source lookups. */
 export const getHeadingTool = tool('usitc_get_heading', {
   title: 'Inspect an HTS heading and ancestry',
   description:
-    'Inspect a four-, six- or eight-digit HTS classification and its complete indented descendants, including unnamed superior rows. Published section titles are retained separately in sections, outside legal ancestry. Ancestry is built from the whole containing heading before filtering. Each parent and inherited-rate source has an exact nodeId follow-up. Chapters 98 and 99 preserve published forest roots without inventing four-digit records.',
+    'Inspect a four-, six-, eight- or ten-digit HTS classification and its complete indented descendants, including unnamed superior rows. Published section titles are retained separately in sections, outside legal ancestry. Ancestry is built from the whole containing heading before filtering. Each parent and inherited-rate source has an exact nodeId follow-up. Chapters 98 and 99 preserve published forest roots without inventing four-digit records.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     code: z
       .string()
-      .describe('Four-, six- or eight-digit HTS code, bare or conventionally dotted.'),
+      .regex(CODE_INPUT.pattern, CODE_INPUT.message)
+      .describe('Four-, six-, eight- or ten-digit HTS code, bare or conventionally dotted.'),
     nodeId: z
       .string()
       .optional()
       .describe(
         'Exact returned node identifier within this classification subtree; omit to browse.',
       ),
-    ...paginationInputShape,
+    ...paginationInputShape(10),
   }),
   output: z.object({
     ...metadataShape,
@@ -50,7 +51,7 @@ export const getHeadingTool = tool('usitc_get_heading', {
     sections: z
       .array(
         z
-          .object(tariffRowShape)
+          .object(sourceRowShape)
           .describe('One complete published subchapter marker retained outside legal ancestry.'),
       )
       .describe(
@@ -65,13 +66,6 @@ export const getHeadingTool = tool('usitc_get_heading', {
   enrichment: listEnrichment,
   enrichmentTrailer,
   errors: [
-    {
-      reason: 'invalid_code',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'Code is not a supported four-, six- or eight-digit identifier.',
-      recovery: 'Call usitc_list_reference with topic identifiers and use a supported code.',
-      thrownBy: 'service',
-    },
     {
       reason: 'invalid_cursor',
       code: JsonRpcErrorCode.ValidationError,
@@ -102,7 +96,7 @@ export const getHeadingTool = tool('usitc_get_heading', {
     },
   ],
   async handler(input, ctx) {
-    const code = normalizeCode(input.code, [4, 6, 8]).code;
+    const code = normalizeCode(input.code).code;
     const nodeId = input.nodeId?.trim() || undefined;
     const cursor = readCursor(input.cursor, 'usitc_get_heading', {
       code,
@@ -117,7 +111,8 @@ export const getHeadingTool = tool('usitc_get_heading', {
       ctx,
     );
     ctx.enrich.total(result.page.total);
-    if (notice) ctx.enrich.notice(notice);
+    const message = pageNotice(notice, input.limit);
+    if (message) ctx.enrich.notice(message);
     return result;
   },
   format: formatSourceData,

@@ -5,19 +5,19 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  CODE_INPUT,
+  COUNTRY_INPUT,
   normalizeCode,
   normalizeCountryCode,
 } from '../../../services/reference/reference-service.js';
 import { TariffService } from '../../../services/tariffs/tariff-service.js';
 import { getUsitcService } from '../../../services/usitc/usitc-service.js';
-import { enrichmentTrailer, formatSourceData } from '../reply.js';
+import { formatSourceData } from '../reply.js';
 import {
   countryAssessmentSchema,
   headingNodeSchema,
-  listEnrichment,
   metadataShape,
   parsedSpecialSchema,
-  resolvedRatesSchema,
 } from '../schemas.js';
 
 /** All published columns remain visible; no rate selection or combined-duty arithmetic. */
@@ -29,9 +29,11 @@ export const lookupDutyRateTool = tool('usitc_lookup_duty_rate', {
   input: z.object({
     code: z
       .string()
+      .regex(CODE_INPUT.pattern, CODE_INPUT.message)
       .describe('Exact eight- or ten-digit HTS identifier, bare or conventionally dotted.'),
     countryCode: z
       .string()
+      .regex(COUNTRY_INPUT.pattern, COUNTRY_INPUT.message)
       .optional()
       .describe('Assigned ISO 3166-1 alpha-2 country; comparison only, never sent upstream.'),
   }),
@@ -46,11 +48,8 @@ export const lookupDutyRateTool = tool('usitc_lookup_duty_rate', {
     row: headingNodeSchema
       .optional()
       .describe(
-        'Original published source row, including a unique combined row when resolving an absent eight-digit number.',
+        'Original published source row with all resolved duty columns in resolvedRates, including a unique combined row when resolving an absent eight-digit number.',
       ),
-    resolvedRates: resolvedRatesSchema
-      .optional()
-      .describe('All resolved duty columns when the exact number exists.'),
     specialPrograms: parsedSpecialSchema
       .optional()
       .describe('Decoded nonblank Special cell, preserving unmatched text.'),
@@ -79,20 +78,18 @@ export const lookupDutyRateTool = tool('usitc_lookup_duty_rate', {
       .describe('Research pointer with no fabricated candidate count.'),
     guidance: z.string().optional().describe('Exact research follow-up for a successful miss.'),
   }),
-  enrichment: listEnrichment,
-  enrichmentTrailer,
   errors: [
     {
       reason: 'invalid_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Identifier is not exactly eight or ten digits in a supported form.',
+      when: 'Identifier is a four- or six-digit code rather than an eight- or ten-digit number.',
       recovery: 'Call usitc_get_heading with a four-digit heading to inspect valid rate numbers.',
       thrownBy: 'service',
     },
     {
       reason: 'invalid_country',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Country is not an assigned ISO alpha-2 value.',
+      when: 'Two-letter country is not an assigned ISO 3166-1 alpha-2 code.',
       recovery: 'Use an assigned two-letter ISO country code or omit countryCode.',
       thrownBy: 'service',
     },
@@ -114,9 +111,7 @@ export const lookupDutyRateTool = tool('usitc_lookup_duty_rate', {
   async handler(input, ctx) {
     const code = normalizeCode(input.code, [8, 10]).code;
     const countryCode = normalizeCountryCode(input.countryCode);
-    const result = await new TariffService(getUsitcService()).duty(code, countryCode, ctx);
-    if (result.guidance) ctx.enrich.notice(result.guidance);
-    return result;
+    return await new TariffService(getUsitcService()).duty(code, countryCode, ctx);
   },
   format: formatSourceData,
 });

@@ -12,6 +12,7 @@ import {
   programNames,
   qualificationNotice,
   quantityUnitNames,
+  verifiedEditions,
 } from './program-data.js';
 
 /** A supported HTS classification precision, measured in digits. */
@@ -26,7 +27,54 @@ export interface NormalizedCode {
 }
 
 /** Bare 4/6/8/10 digits, or dots at the conventional boundaries (including NNNN.NN.NNNN). */
-const CODE_FORM = /^(?:\d{4}(?:\d{2}){0,3}|\d{4}\.\d{2}(?:\.\d{2}){0,2}|\d{4}\.\d{2}\.\d{4})$/;
+const CODE_ALTERNATION = String.raw`\d{4}(?:\d{2}){0,3}|\d{4}\.\d{2}(?:\.\d{2}){0,2}|\d{4}\.\d{2}\.\d{4}`;
+const CODE_FORM = new RegExp(`^(?:${CODE_ALTERNATION})$`);
+
+/**
+ * A schema pattern and the message a caller receives when input fails it. `\s` matches exactly
+ * what `trim()` removes, so each pattern admits the outer whitespace the normalizers strip. JSON
+ * Schema carries no regex flags, so letter classes spell out both cases. Optional forms nest the
+ * trailing `\s*` inside the optional group so no two whitespace runs compete for the same input.
+ */
+export interface InputPattern {
+  readonly message: string;
+  readonly pattern: RegExp;
+}
+/** Required `code` on the heading, duty and additional-duty tools; handlers keep per-tool lengths. */
+export const CODE_INPUT: InputPattern = {
+  pattern: new RegExp(String.raw`^\s*(?:${CODE_ALTERNATION})\s*$`),
+  message:
+    'Write the code as 4, 6, 8 or 10 digits, bare or dotted at the conventional HTS boundaries: 8507, 8507.60, 8507.60.00, 8507.60.00.30 or 8507.60.0030.',
+};
+/** Optional `candidateCode`; blank means omitted, and the handler keeps the Chapter 99 checks. */
+export const CANDIDATE_CODE_INPUT: InputPattern = {
+  pattern: new RegExp(String.raw`^\s*(?:(?:${CODE_ALTERNATION})\s*)?$`),
+  message:
+    'Use a returned Chapter 99 candidate number, bare or dotted (99038803 or 9903.88.03), or omit candidateCode.',
+};
+/** Optional `countryCode`; blank means omitted, and the handler keeps ISO assignment. */
+export const COUNTRY_INPUT: InputPattern = {
+  pattern: /^\s*(?:[A-Za-z]{2}\s*)?$/,
+  message:
+    'Use a two-letter ISO 3166-1 alpha-2 country code such as CN or DE, or omit countryCode.',
+};
+/** Browse `chapter`; the handler keeps the 01–99 range. */
+export const CHAPTER_INPUT: InputPattern = {
+  pattern: /^\s*\d{1,2}\s*$/,
+  message: 'Use a chapter number from 01 through 99, written as one or two digits (8, 08 or 85).',
+};
+/** Search `query`: at least one non-whitespace character. */
+export const QUERY_INPUT: InputPattern = {
+  pattern: /\S/,
+  message: 'Supply nonblank commodity text or an HTS code prefix.',
+};
+/** Optional search `codePrefix`: a two-digit chapter or a 4/6/8-digit code; blank means omitted. */
+export const CODE_PREFIX_INPUT: InputPattern = {
+  pattern: /^\s*(?:(?:\d{2}|\d{4}(?:\d{2}){0,2}|\d{4}\.\d{2}(?:\.\d{2})?)\s*)?$/,
+  message:
+    'Use a two-digit chapter or a four-, six- or eight-digit code, bare or dotted (61, 6109, 6109.10 or 6109.10.00), or omit codePrefix.',
+};
+
 const SPI_CITATION = 'General Note 3(c)(i)';
 const column2CountryCodes: ReadonlySet<string> = new Set(column2Countries.map(([code]) => code));
 
@@ -47,7 +95,10 @@ export function normalizeCode(
     (length !== 4 && length !== 6 && length !== 8 && length !== 10) ||
     !allowedLengths.includes(length)
   ) {
-    throw validationError(`Use an HTS identifier containing ${allowedLengths.join(', ')} digits.`, {
+    const last = allowedLengths.at(-1);
+    const lengths =
+      allowedLengths.length > 1 ? `${allowedLengths.slice(0, -1).join(', ')} or ${last}` : last;
+    throw validationError(`Use an HTS identifier containing ${lengths} digits.`, {
       reason: 'invalid_code',
     });
   }
@@ -59,6 +110,13 @@ export function normalizeCode(
     chapter: digits.slice(0, 2),
     heading: digits.slice(0, 4),
   };
+}
+
+/** Canonical chapter (`61`) or 4/6/8-digit code (`6109.10`) prefix; blank means omitted. */
+export function normalizeCodePrefix(input?: string): string | undefined {
+  const value = input?.trim();
+  if (!value) return undefined;
+  return /^\d{2}$/.test(value) ? value : normalizeCode(value, [4, 6, 8]).code;
 }
 
 /** Chapters are strings in 01–99, including reserved chapters. */
@@ -84,51 +142,59 @@ export function normalizeCountryCode(input?: string): string | undefined {
 /** Preserve commodity language unless the entire search is a supported HTS identifier. */
 export function normalizeSearchQuery(input: string): string {
   const value = input.trim();
-  if (!value) throw validationError('Supply a nonblank commodity description or HTS code prefix.');
   if (CODE_FORM.test(value)) return normalizeCode(value).code;
   return value;
 }
 
 /** A symbol's name is decoded independently of country-list verification. */
 export interface ProgramReference {
-  citation: string;
-  conditionality: string;
   countryListCoverage: 'unknown';
   kind: 'program';
   name: string;
-  qualificationNotice: string;
-  sourceEdition: string;
-  sourceUrl: string;
   symbol: string;
 }
 const programs: readonly ProgramReference[] = programNames.map(([symbol, name]) => ({
   kind: 'program',
   symbol,
   name,
-  citation: SPI_CITATION,
-  sourceUrl: generalNote3Url,
-  sourceEdition: decoderSourceEdition,
-  conditionality: 'All legal requirements of the program must be met; General Note 3(a)(iii).',
   countryListCoverage: 'unknown',
-  qualificationNotice,
 }));
 const programBySymbol = new Map(programs.map((program) => [program.symbol, program]));
 
-/** Complete reviewed symbol decoder; no country relationship has been independently verified. */
-export function listProgramReferences(): readonly ProgramReference[] {
-  return programs;
+/**
+ * Complete reviewed symbol decoder; no country relationship has been independently verified.
+ * Citation, source and qualification text apply to every symbol and are stated once in `decoder`.
+ */
+export function listProgramReferences() {
+  return {
+    decoder: {
+      sourceEdition: decoderSourceEdition,
+      citation: SPI_CITATION,
+      sourceUrl: generalNote3Url,
+      conditionality: 'All legal requirements of the program must be met; General Note 3(a)(iii).',
+      qualificationNotice,
+    },
+    items: programs,
+  };
 }
 
-/** Published GN3(g) abbreviations; superscript exponents are represented as Unicode superscripts. */
+/**
+ * Published GN3(g) abbreviations; superscript exponents are represented as Unicode superscripts.
+ * Citation and source apply to every unit and are stated once in `decoder`.
+ */
 export function listQuantityUnits() {
-  return quantityUnitNames.map(([symbol, meaning]) => ({
-    kind: 'unit' as const,
-    symbol,
-    meaning,
-    citation: 'General Note 3(g)',
-    sourceUrl: generalNote3Url,
-    sourceEdition: decoderSourceEdition,
-  }));
+  return {
+    decoder: {
+      sourceEdition: decoderSourceEdition,
+      citation: 'General Note 3(g)',
+      sourceUrl: generalNote3Url,
+    },
+    items: quantityUnitNames.map(([symbol, meaning]) => ({
+      kind: 'unit' as const,
+      symbol,
+      meaning,
+    })),
+  };
 }
 
 /** Published application navigation labels, retaining their source spelling and capture provenance. */
@@ -292,7 +358,8 @@ export function assessCountry(
   releaseName: string,
 ) {
   const country = normalizeCountryCode(countryCode);
-  const editionMatches = releaseName === decoderSourceEdition;
+  const verified = verifiedEditions.includes(releaseName);
+  const editionMatches = releaseName === decoderSourceEdition || verified;
   return {
     ...(country ? { countryCode: country } : {}),
     ...(country
@@ -318,9 +385,11 @@ export function assessCountry(
       .flatMap((clause) => clause.programs)
       .filter((program) => program.recognized).length,
     notice: country
-      ? editionMatches
-        ? 'Column 2 listing reports only membership in the edition-pinned General Note 3(b) list. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.'
-        : 'Column 2 listing is unknown because the current edition differs from the reviewed General Note 3(b) source. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.'
+      ? verified
+        ? `Column 2 listing reports only membership in the General Note 3(b) list reviewed in ${decoderSourceEdition}, whose text was verified unchanged in ${releaseName}. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.`
+        : editionMatches
+          ? 'Column 2 listing reports only membership in the edition-pinned General Note 3(b) list. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.'
+          : 'Column 2 listing is unknown because the current edition differs from the reviewed General Note 3(b) source. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.'
       : 'No country was requested. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.',
     qualificationNotice,
   };

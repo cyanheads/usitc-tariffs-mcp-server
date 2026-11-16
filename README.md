@@ -46,15 +46,15 @@ The U.S. Harmonized Tariff Schedule from the [USITC](https://hts.usitc.gov/). Se
 
 ### `usitc_search_hts` <sub>tool</sub>
 
-- Required `query`: commodity text or a code prefix. `limit` defaults to 25, with at most 100 items per page; follow `page.nextCursor` with the same arguments.
+- Required `query`: commodity text or a code prefix. Optional `codePrefix` (chapter `61`, or `6109`, `6109.10`, `6109.10.00`) keeps only matches under that code before counting and paging. `limit` defaults to 25, with at most 100 items per page; follow `page.nextCursor` with the same arguments.
 - Returns `context: "flat_search_matches"` and rows with `ratesResolved: false`. Use heading lookup for ancestry and duty lookup for resolved base columns; no matches is a successful empty result.
 
 ---
 
 ### `usitc_get_heading` <sub>tool</sub>
 
-- Required `code`: four, six, or eight digits, bare or conventionally dotted. Optional returned `nodeId` selects an exact node; `limit` defaults to 25, at most 100 per page.
-- Returns flat source-order `nodes` with `parentId`, executable `parentFollowUp`, and `resolvedRates` states of `published`, `inherited`, or `not_published`. Unnumbered superior rows remain part of the hierarchy; published subchapter titles are preserved separately in `sections`. A missing classification returns `found: false`.
+- Required `code`: four, six, eight, or ten digits, bare or conventionally dotted; a ten-digit code selects that statistical line and its indented descendants. Optional returned `nodeId` selects an exact node; `limit` defaults to 10, at most 100 per page.
+- Returns flat source-order `nodes` with `parentId`, executable `parentFollowUp`, and `resolvedRates` states of `published`, `inherited`, or `not_published`. Published columns carry only `state` and `text`; inherited columns also name their source row with `sourceFollowUp`. Unnumbered superior rows remain part of the hierarchy; published subchapter titles are preserved separately in `sections`. A missing classification returns `found: false`.
 
 ---
 
@@ -68,15 +68,15 @@ The U.S. Harmonized Tariff Schedule from the [USITC](https://hts.usitc.gov/). Se
 ### `usitc_lookup_duty_rate` <sub>tool</sub>
 
 - Required eight- or ten-digit `code`; optional ISO alpha-2 `countryCode`. Identifiers retain leading zeros and accept conventional dots. An absent eight-digit row resolves only through its unique published ten-digit row, preserving the source number; ambiguous suffixes remain unresolved. Ten-digit requests require their exact published number.
-- Returns General, Special, and Column 2 cells with rate-source provenance, or `found: false`. Blank statistical cells inherit only from the matching eight-digit legal ancestor; blank never means zero or `Free`.
-- `specialPrograms` preserves unmatched text and `parseCoverage`; Special-program membership remains `unknown`, and eligibility and column selection remain `not_determined`. With `countryCode`, `countryAssessment.column2Listing` reports membership in the reviewed General Note 3(b) list for its pinned edition, or `unknown` when editions differ. Country input does not select a rate or establish preference qualification.
+- Returns General, Special, and Column 2 cells in `row.resolvedRates` with rate-source provenance, or `found: false`. Blank statistical cells inherit only from the matching eight-digit legal ancestor; blank never means zero or `Free`.
+- `specialPrograms` preserves unmatched text and `parseCoverage`; Special-program membership remains `unknown`, and eligibility and column selection remain `not_determined`. With `countryCode`, `countryAssessment.column2Listing` reports membership in the reviewed General Note 3(b) list when the checked edition is the reviewed `2026HTSRev21` or one verified to carry identical General Note 3 text (`editionMatches: true`), and `unknown` otherwise; provenance stays on the reviewed edition. Country input does not select a rate or establish preference qualification.
 
 ---
 
 ### `usitc_check_additional_duties` <sub>tool</sub>
 
-- Required exact eight- or ten-digit base commodity `code`, excluding Chapter 99; optional `countryCode`. `view` is `candidates` (default), `evidence` (requires returned `candidateCode`), or `unmapped`. `limit` defaults to 25, at most 100 per page.
-- `coverage.status` is always `partial`; inspect `supportedGrammar`, `limitations`, and unresolved evidence. Candidate `legalStatus` is `not_determined`. Unknown and different-country evidence remains visible; an empty candidate list never establishes clearance.
+- Required exact eight- or ten-digit base commodity `code`, excluding Chapter 99; optional `countryCode`. `view` is `candidates` (default), `evidence` (requires returned `candidateCode`), or `unmapped`. `limit` defaults to 10 (including `noteId` pages), at most 100 per page.
+- `coverage.status` is always `partial`; the first candidates page carries `supportedGrammar` and the coverage facts, parser limitations, including the clearance limit, are in every page's `notices`, and unresolved evidence is in the unmapped view. Candidate `legalStatus` is `not_determined`. Unknown and different-country evidence remains visible; an empty candidate list never establishes clearance.
 - Explicit “following” clauses can link directly owned numbered code lists to their governing heading, with separate passage follow-ups. Descriptive items remain qualified context. Reviewed single-country “product(s) of China” or “product(s) of Canada” scopes can label country relations; exceptions, conditions and conflicting scopes remain unknown.
 - Follow returned `nextCall` and evidence `followUp` objects. For passages, supply `noteId` and optional `noteCursor` with the original code/country selectors, omitting `view`, `candidateCode`, and collection `cursor`; concatenate all `notesPage.fragments` across pages and inspect governing context.
 
@@ -85,7 +85,7 @@ The U.S. Harmonized Tariff Schedule from the [USITC](https://hts.usitc.gov/). Se
 ### `usitc_list_reference` <sub>tool</sub>
 
 - Required `topic`: `identifiers`, `spi`, `chapters`, `units`, or `releases`. `limit` defaults to 25, at most 100 entries per page.
-- Program and unit decoders carry their verification edition and citations. SPI country membership remains unknown; release records describe published editions without enabling historical tariff lookup.
+- `spi` and `units` pages state edition, citation, and source once in `decoder`. SPI country membership remains unknown; release records describe published editions without enabling historical tariff lookup.
 
 ## Features
 
@@ -101,7 +101,7 @@ USITC-specific:
 Agent-friendly output:
 
 - Provenance — every result carries `release`, `source`, and `notices`; edition checks prevent detected cross-edition mixing, but do not prove atomic publication or current law.
-- Complete continuation — pages expose `total`, `returned`, `effectiveLimit`, and `nextCursor`; a 24,000-byte complete-reply budget can reduce page size with `budgetLimited: true`. Cursors bind the original arguments and source snapshot, expire within 15 minutes, and can expire earlier after eviction or restart.
+- Complete continuation — pages expose `total`, `returned`, `effectiveLimit`, and `nextCursor`; every page but the last returns exactly `effectiveLimit` whole items (the requested limit, clamped to 100), and a clamped limit adds `Requested limit <n> was clamped to the 100-item page cap.` to `notice`. Cursors bind the original arguments and source snapshot, expire within 15 minutes, and can expire earlier after eviction or restart.
 - Explicit uncertainty — `found`, rate states, partial coverage, and typed error reasons support branching without guessing. Restart the original call without cursors after `cursor_expired`; fix selectors after `invalid_cursor` or `invalid_selector`.
 - Matching response surfaces — `content[]` and `structuredContent` carry the same selected data; published source text is framed as data rather than instructions.
 
@@ -155,7 +155,7 @@ No server-specific environment variables are required. See [`.env.example`](./.e
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+ for the published package) and network access to `hts.usitc.gov`.
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+ for the published package) and network access to `hts.usitc.gov`.
 
 ```sh
 git clone https://github.com/cyanheads/usitc-tariffs-mcp-server.git
@@ -201,6 +201,7 @@ The image serves HTTP on port 3010 with stateless sessions and logs under `/var/
 | `src/services/tariffs/` | Hierarchy, base-rate resolution, and argument-bound pagination |
 | `src/services/reference/` | Identifier validation and edition-pinned reference decoders |
 | `src/services/chapter99/` | Partial evidence indexing, selectors, and passage fragments |
+| `skills/` | Agent skill shipped in the npm package, Docker image, MCPB bundle and plugins, and served over MCP |
 | `tests/` | Tests and public-source fixtures mirroring `src/` |
 | `docs/` | [Design contracts](./docs/design.md) and [directory tree](./docs/tree.md) |
 

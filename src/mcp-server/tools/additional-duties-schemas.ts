@@ -50,21 +50,26 @@ const evidenceSchema = z
     matchedCode: z
       .string()
       .optional()
-      .describe('Exact commodity code mentioned; absent for unresolved compiler scope.'),
+      .describe(
+        'Matched commodity code in canonical dotted form (NNNN.NN.NN or NNNN.NN.NN.NN); absent for unresolved compiler scope.',
+      ),
     matchLevel: z
       .enum(['exact', 'rate_line', 'statistical_subset'])
       .optional()
-      .describe('Exact, verified parent or narrower statistical reference.'),
+      .describe(
+        'Exact, verified parent or narrower statistical reference; absent on a footnote from an ancestor row that is not the inherited rate source.',
+      ),
     noteId: z.string().optional().describe('Complete supporting passage identifier.'),
     noteLocator: z
       .string()
       .optional()
       .describe('Legal label or explicitly ambiguous document-order locator.'),
-    passageId: z.string().optional().describe('Complete normalized passage identifier.'),
     sourceCode: z
       .string()
       .optional()
-      .describe('Referenced Chapter 99 code; absent when unresolved.'),
+      .describe(
+        'Referenced Chapter 99 code in canonical dotted form (9903.NN.NN), equal to its candidate code; absent when unresolved.',
+      ),
     statusMention: z
       .boolean()
       .describe('Source contains status words; current legal status remains undetermined.'),
@@ -106,7 +111,6 @@ const candidateSchema = z
     publishedRates: publishedRatesSchema
       .optional()
       .describe('Every published rate column, without combined-duty arithmetic.'),
-    sourceUrl: z.string().describe('Exact Chapter 99 export source URL supplying the rate row.'),
     evidenceCount: z.number().int().describe('Complete count of candidate evidence records.'),
     compilerNoticeCount: z
       .number()
@@ -135,7 +139,9 @@ export const additionalDutiesOutputSchema = z.object({
         .describe('Exact text normalization rule used for every retrievable passage.'),
     })
     .optional()
-    .describe('Notes decoding and normalization provenance; absent when notes were not searched.'),
+    .describe(
+      'Notes decoding and normalization provenance, on the first candidates page and noteId pages; absent when notes were not searched.',
+    ),
   code: z.string().describe('Canonical exact commodity number.'),
   found: z
     .boolean()
@@ -161,32 +167,56 @@ export const additionalDutiesOutputSchema = z.object({
         .describe('Retrieve all base duty columns separately.'),
     })
     .optional()
-    .describe('Base-line identification without duplicating the full source row.'),
+    .describe(
+      'Base-line identification without duplicating the full source row; first candidates page only.',
+    ),
   coverage: z
     .object({
-      status: z.literal('partial').describe('Permanent first-version grammar limitation.'),
+      status: z
+        .literal('partial')
+        .describe(
+          'Always partial: the supported grammar covers part of the notes, so no page, empty or not, establishes clearance from additional duties.',
+        ),
       parserVersion: z
         .string()
+        .optional()
         .describe('Parser grammar version, or not_run for an exact base miss.'),
       sourceDigest: z
         .string()
-        .describe('Chapter 99 notes byte digest; empty when notes were not searched.'),
-      supportedGrammar: z.array(z.string()).describe('Actually implemented grammar labels.'),
-      totalNoteBlocks: z.number().int().describe('Complete normalized note block count.'),
-      parsedListBlocks: z.number().int().describe('Blocks linked by supported inclusion grammar.'),
+        .optional()
+        .describe(
+          'First 16 hex of the Chapter 99 notes byte digest; empty when notes were not searched.',
+        ),
+      supportedGrammar: z
+        .array(z.string())
+        .optional()
+        .describe('Actually implemented grammar labels.'),
+      totalNoteBlocks: z
+        .number()
+        .int()
+        .optional()
+        .describe('Complete normalized note block count.'),
+      parsedListBlocks: z
+        .number()
+        .int()
+        .optional()
+        .describe('Blocks linked by supported inclusion grammar.'),
       unresolvedReferenceBlocks: z
         .number()
         .int()
+        .optional()
         .describe('Commodity-mention blocks lacking supported positive links.'),
-      ambiguousBlocks: z.number().int().describe('Blocks with ambiguous legal labels.'),
+      ambiguousBlocks: z.number().int().optional().describe('Blocks with ambiguous legal labels.'),
       unmappedEvidenceCount: z
         .number()
         .int()
+        .optional()
         .describe('Complete unmatched evidence count, including unresolved compiler context.'),
-      unmappedFollowUp: followUpSchema.describe('Retrieve all unresolved evidence.'),
-      limitations: z.array(z.string()).describe('Measured and permanent parser limitations.'),
+      unmappedFollowUp: followUpSchema.optional().describe('Retrieve all unresolved evidence.'),
     })
-    .describe('Partial coverage facts, never a completeness or clearance claim.'),
+    .describe(
+      'Partial coverage, never a completeness or clearance claim. The first candidates page (no cursor) carries the measured facts; every other page carries status only. Parser limitations are listed in notices.',
+    ),
   notComputed: z
     .array(z.string())
     .describe('Legal, qualification and arithmetic questions not determined.'),
@@ -205,7 +235,9 @@ export const additionalDutiesOutputSchema = z.object({
         .describe('Candidates with recognized different-country scope, retained.'),
     })
     .optional()
-    .describe('Factual prioritization counts over the full candidate collection.'),
+    .describe(
+      'Factual prioritization counts over the full candidate collection; first candidates page only.',
+    ),
   collectionTotals: z
     .object({
       candidates: z.number().int().describe('Merged candidate count.'),
@@ -213,8 +245,14 @@ export const additionalDutiesOutputSchema = z.object({
       unmappedEvidence: z.number().int().describe('All unresolved evidence records.'),
     })
     .optional()
-    .describe('Complete collection totals before page selection.'),
+    .describe('Complete collection totals before page selection; first candidates page only.'),
   candidateCode: z.string().optional().describe('Selected candidate in evidence view.'),
+  sourceUrl: z
+    .string()
+    .optional()
+    .describe(
+      'Chapter 99 rate export URL that supplied every candidate description and published rate; on candidates pages.',
+    ),
   candidates: z
     .array(candidateSchema)
     .optional()
@@ -234,7 +272,6 @@ export const additionalDutiesOutputSchema = z.object({
         .array(
           z
             .object({
-              passageId: z.string().describe('Complete normalized passage identifier.'),
               fragmentIndex: z.number().int().describe('Zero-based scalar-safe fragment order.'),
               fragmentCount: z
                 .number()
@@ -248,11 +285,11 @@ export const additionalDutiesOutputSchema = z.object({
       totalFragments: z.number().int().describe('Complete passage fragment count.'),
       returnedFragments: z.number().int().describe('Fragments returned on this page.'),
       context: z.string().describe('Full-fragment and governing-context retrieval requirements.'),
-      nextNoteCursor: z
-        .string()
+      nextCall: followUpSchema
         .optional()
-        .describe('Next fragment page; every omitted fragment remains reachable.'),
-      nextCall: followUpSchema.optional().describe('Exact passage continuation arguments.'),
+        .describe(
+          'Exact passage continuation arguments, with page.nextCursor as noteCursor; every omitted fragment remains reachable.',
+        ),
     })
     .optional()
     .describe('Complete passage retrieval, without candidate arrays.'),

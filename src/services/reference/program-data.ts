@@ -5,6 +5,12 @@
 
 /** Edition of the reviewed General Note 3 PDF; never relabel this with the live edition. */
 export const decoderSourceEdition = '2026HTSRev21';
+/**
+ * Editions whose General Note 3 text `scripts/verify-general-note-3.ts` found identical to the
+ * reviewed edition apart from the running header. Their GN3(b) listing is reported from the
+ * reviewed source, which keeps its own edition, citation and URL.
+ */
+export const verifiedEditions: readonly string[] = ['2026HTSRev22', '2026HTSRev23'];
 /** Pinned official source; GN page 4 lists Column 2 countries, pages 4–5 symbols, pages 7–8 abbreviations. */
 export const generalNote3Url =
   'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203';

@@ -7,17 +7,19 @@ import { conflict, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { normalizeCode, normalizeCountryCode } from '../reference/reference-service.js';
 import {
   buildHeadingTree,
+  DUTY_NODE_MISS_GUIDANCE,
   type HeadingNode,
   type NodeFollowUp,
   resolveDutyNode,
 } from '../tariffs/heading-tree.js';
-import { digestValue, packPage, readCursor } from '../tariffs/pagination.js';
+import { digestValue, PAGE_CAP, packPage, readCursor, shortDigest } from '../tariffs/pagination.js';
 import type { Source, TariffRow } from '../usitc/types.js';
 import type { UsitcService } from '../usitc/usitc-service.js';
 import {
   buildChapter99Index,
   type Chapter99Evidence,
   type Chapter99Index,
+  CLEARANCE_LIMITATION,
   findChapter99Evidence,
   getChapter99Fragments,
   productCountry,
@@ -41,6 +43,10 @@ const ZERO_NOTICE =
   'No Chapter 99 candidates were identified by the supported parser. Coverage is partial and this does not establish absence of additional duties. Call usitc_get_heading for the base classification and usitc_list_reference with topic identifiers for coverage guidance.';
 const UNMAPPED_NOTICE =
   'Matching Chapter 99 passages could not be linked safely to a heading. Call usitc_check_additional_duties with a returned noteId to inspect the full supporting passages.';
+const MISS_LIMITATION =
+  'No notes search was performed because this exact base number does not exist.';
+const TEXT_RULE =
+  'Decode the declared charset using the Web Encoding Standard; decode HTML entities; emit each text node once in document order, with line breaks at block and table-row boundaries and tabs between cells.';
 
 /** One selected collection, or one source passage; limit and view arrive schema-validated with defaults. */
 export interface AdditionalDutyInput {
@@ -76,14 +82,13 @@ type FollowUp = {
 };
 type Evidence = Omit<
   Chapter99Evidence,
-  'kind' | 'matchedCode' | 'matchLevel' | 'noteId' | 'noteLocator' | 'passageId'
+  'kind' | 'matchedCode' | 'matchLevel' | 'noteId' | 'noteLocator'
 > & {
   kind: Chapter99Evidence['kind'] | 'footnote';
   matchedCode?: string;
   matchLevel?: Chapter99Evidence['matchLevel'];
   noteId?: string;
   noteLocator?: string;
-  passageId?: string;
   scope?: 'unresolved';
   footnote?: NonNullable<TariffRow['footnotes']>[number];
   sourceNodeId?: string;
@@ -205,7 +210,7 @@ export class AdditionalDutiesService {
           ),
         ),
         digest,
-        snapshotId: `chapter99:${digest}`,
+        snapshotId: `chapter99:${shortDigest(digest)}`,
         expiresAt: Date.now() + TTL_MS,
         source: notes.source,
         ratesSourceUrl: rates.source.scheduleUrl,
@@ -222,37 +227,37 @@ export class AdditionalDutiesService {
         ...selector,
       },
     });
-    const unmappedFollowUp = follow({ view: 'unmapped' });
+    // Only the first candidates page carries the summary; every other page states partial status only.
+    const summaryPage = args.view === 'candidates' && !args.noteId && !cursor;
+    const partial = { status: 'partial' as const };
     if (!row || !completed) {
-      const guidance =
-        'No exact rate line or statistical number matched. Call usitc_get_heading with the containing 4-digit heading to inspect its valid descendants.';
       const result = {
         release: assembled.release,
         source: base.source,
-        notices: assembled.notices,
+        notices: [...new Set([...assembled.notices, MISS_LIMITATION, CLEARANCE_LIMITATION])],
         code: args.code,
         found: false,
         view: args.noteId ? ('notes' as const) : args.view,
-        page: { total: 0, returned: 0, effectiveLimit: Math.min(args.limit, 100) },
-        coverage: {
-          status: 'partial' as const,
-          parserVersion: 'not_run',
-          sourceDigest: '',
-          supportedGrammar: [] as string[],
-          totalNoteBlocks: 0,
-          parsedListBlocks: 0,
-          unresolvedReferenceBlocks: 0,
-          ambiguousBlocks: 0,
-          unmappedEvidenceCount: 0,
-          unmappedFollowUp,
-          limitations: [
-            'No notes search was performed because this exact base number does not exist.',
-          ],
-        },
+        page: { total: 0, returned: 0, effectiveLimit: Math.min(args.limit, PAGE_CAP) },
+        coverage: summaryPage
+          ? {
+              ...partial,
+              parserVersion: 'not_run',
+              sourceDigest: '',
+              supportedGrammar: [],
+              totalNoteBlocks: 0,
+              parsedListBlocks: 0,
+              unresolvedReferenceBlocks: 0,
+              ambiguousBlocks: 0,
+              unmappedEvidenceCount: 0,
+              // No unmappedFollowUp: the unmapped view of a missing base number misses again.
+            }
+          : partial,
         notComputed: NOT_COMPUTED,
-        guidance,
+        guidance: DUTY_NODE_MISS_GUIDANCE,
       };
-      return { result, notice: guidance };
+      // guidance already carries the next call; an identical enrichment notice would repeat it.
+      return { result, notice: undefined };
     }
     // Publish only an index whose complete source assembly passed the edition post-check.
     this.completed = completed;
@@ -263,14 +268,15 @@ export class AdditionalDutiesService {
       ...(base8 && { verifiedBase8: base8 }),
       ...(args.countryCode && { countryCode: args.countryCode }),
     });
-    const evidence: Evidence[] = found.evidence.map((item) => ({
+    // The index keys codes by digits; replies use the canonical dotted form of every other tool.
+    const published = (item: Chapter99Evidence): Evidence => ({
       ...item,
+      ...(item.sourceCode && { sourceCode: normalizeCode(item.sourceCode).code }),
+      matchedCode: normalizeCode(item.matchedCode).code,
       followUp: follow({ noteId: item.noteId }),
-    }));
-    const unmapped: Evidence[] = found.unmappedEvidence.map((item) => ({
-      ...item,
-      followUp: follow({ noteId: item.noteId }),
-    }));
+    });
+    const evidence = found.evidence.map(published);
+    const unmapped = found.unmappedEvidence.map(published);
     const referenced = new Set([...evidence, ...unmapped].map((item) => item.noteId));
     for (const passage of completed.index.passages) {
       ctx.signal?.throwIfAborted();
@@ -287,13 +293,12 @@ export class AdditionalDutiesService {
         scope: 'unresolved',
         noteId: passage.noteId,
         noteLocator: passage.noteLocator,
-        passageId: passage.passageId,
         statusMention: passage.statusMention,
         countryRelation: args.countryCode ? 'unknown' : 'not_requested',
         followUp: follow({ noteId: passage.noteId }),
       });
     }
-    evidence.push(...this.footnotes(row, ancestors, code.digits, code.heading, args.countryCode));
+    evidence.push(...this.footnotes(row, ancestors, args.code, code.heading, args.countryCode));
     const grouped = new Map<string, Evidence[]>();
     for (const item of evidence) {
       if (!item.sourceCode) {
@@ -350,7 +355,6 @@ export class AdditionalDutiesService {
         code: candidateCode,
         headingResolved: rate !== undefined,
         ...(rate && { description: rate.description, publishedRates: rate.publishedRates }),
-        sourceUrl: completed.ratesSourceUrl,
         evidenceCount: items.length,
         compilerNoticeCount: items.filter((item) => item.kind === 'compiler_notice').length,
         evidenceFollowUp: follow({ view: 'evidence', candidateCode }),
@@ -366,50 +370,18 @@ export class AdditionalDutiesService {
       const order = { named: 0, unknown: 1, different_country: 2, not_requested: 3 };
       candidates.sort((left, right) => order[left.countryRelation] - order[right.countryRelation]);
     }
-    const coverage = {
-      ...found.coverage,
-      unmappedEvidenceCount: unmapped.length,
-      unmappedFollowUp,
-    };
-    const common = {
+    // Limitations are listed once, in every page's notices; coverage facts stay on the summary page.
+    const { limitations, ...coverageFacts } = found.coverage;
+    const envelope = {
       release: assembled.release,
       source: completed.source,
-      normalization: {
-        charset: completed.charset,
-        textRule:
-          'Decode the declared charset using the Web Encoding Standard; decode HTML entities; emit each text node once in document order, with line breaks at block and table-row boundaries and tabs between cells.',
-      },
-      notices: [...new Set([...assembled.notices, ...completed.notices, ...coverage.limitations])],
+      notices: [...new Set([...assembled.notices, ...completed.notices, ...limitations])],
       code: args.code,
       found: true,
-      baseLine: {
-        code: args.code,
-        nodeId: row.nodeId,
-        dutyFollowUp: {
-          tool: 'usitc_lookup_duty_rate' as const,
-          arguments: {
-            code: args.code,
-            ...(args.countryCode && { countryCode: args.countryCode }),
-          },
-        },
-      },
-      coverage,
+      coverage: partial,
       notComputed: NOT_COMPUTED,
-      countryFilter: {
-        mode: 'retain_unknown' as const,
-        ...(args.countryCode && { countryCode: args.countryCode }),
-        namedCount: candidates.filter((item) => item.countryRelation === 'named').length,
-        unknownCount: candidates.filter((item) => item.countryRelation === 'unknown').length,
-        differentCountryCount: candidates.filter(
-          (item) => item.countryRelation === 'different_country',
-        ).length,
-      },
-      collectionTotals: {
-        candidates: candidates.length,
-        evidence: evidence.length,
-        unmappedEvidence: unmapped.length,
-      },
     };
+    const normalization = { charset: completed.charset, textRule: TEXT_RULE };
     const identity = {
       tool: TOOL,
       args,
@@ -434,7 +406,8 @@ export class AdditionalDutiesService {
         ...identity,
         items: fragments,
         build: (selected, page) => ({
-          ...common,
+          ...envelope,
+          normalization,
           view: 'notes' as const,
           page,
           notesPage: {
@@ -445,7 +418,6 @@ export class AdditionalDutiesService {
             context:
               'Retrieve all fragments and linked governing/qualification passages before interpreting this source.',
             ...(page.nextCursor && {
-              nextNoteCursor: page.nextCursor,
               nextCall: follow({
                 noteId,
                 noteCursor: page.nextCursor,
@@ -469,7 +441,7 @@ export class AdditionalDutiesService {
         ...identity,
         items,
         build: (selected, page) => ({
-          ...common,
+          ...envelope,
           view: 'evidence' as const,
           candidateCode,
           evidence: selected,
@@ -491,7 +463,7 @@ export class AdditionalDutiesService {
         ...identity,
         items: unmapped,
         build: (selected, page) => ({
-          ...common,
+          ...envelope,
           view: 'unmapped' as const,
           unmappedEvidence: selected,
           page,
@@ -502,13 +474,48 @@ export class AdditionalDutiesService {
       });
       return { result, notice: undefined };
     }
+    const summary = summaryPage && {
+      normalization,
+      baseLine: {
+        code: args.code,
+        nodeId: row.nodeId,
+        dutyFollowUp: {
+          tool: 'usitc_lookup_duty_rate' as const,
+          arguments: {
+            code: args.code,
+            ...(args.countryCode && { countryCode: args.countryCode }),
+          },
+        },
+      },
+      coverage: {
+        ...coverageFacts,
+        sourceDigest: shortDigest(coverageFacts.sourceDigest),
+        unmappedEvidenceCount: unmapped.length,
+        unmappedFollowUp: follow({ view: 'unmapped' }),
+      },
+      countryFilter: {
+        mode: 'retain_unknown' as const,
+        ...(args.countryCode && { countryCode: args.countryCode }),
+        namedCount: candidates.filter((item) => item.countryRelation === 'named').length,
+        unknownCount: candidates.filter((item) => item.countryRelation === 'unknown').length,
+        differentCountryCount: candidates.filter(
+          (item) => item.countryRelation === 'different_country',
+        ).length,
+      },
+      collectionTotals: {
+        candidates: candidates.length,
+        evidence: evidence.length,
+        unmappedEvidence: unmapped.length,
+      },
+    };
     const result = packPage({
       ...identity,
       items: candidates,
-      notice,
       build: (selected, page) => ({
-        ...common,
+        ...envelope,
+        ...summary,
         view: 'candidates' as const,
+        sourceUrl: completed.ratesSourceUrl,
         candidates: selected,
         page,
         ...(page.nextCursor && {
@@ -522,7 +529,7 @@ export class AdditionalDutiesService {
   private footnotes(
     row: HeadingNode,
     ancestors: readonly HeadingNode[],
-    digits: string,
+    code: string,
     heading: string,
     countryCode: string | undefined,
   ): Evidence[] {
@@ -557,8 +564,11 @@ export class AdditionalDutiesService {
             relation: 'context_only',
             role: 'mention',
             sourceCode: pointer,
-            matchedCode: digits,
-            matchLevel: entry.scope === 'inherited_rate_source' ? 'rate_line' : 'exact',
+            matchedCode: code,
+            // An ancestor's footnote is attached to a broader row, so it matches no code level.
+            ...(entry.scope !== 'ancestor' && {
+              matchLevel: entry.scope === 'inherited_rate_source' ? 'rate_line' : 'exact',
+            }),
             countryRelation: countryCode ? 'unknown' : 'not_requested',
             statusMention: /\b(?:expired|terminated|suspended)\b/i.test(footnote.value ?? ''),
             sourceNodeId: entry.node.nodeId,

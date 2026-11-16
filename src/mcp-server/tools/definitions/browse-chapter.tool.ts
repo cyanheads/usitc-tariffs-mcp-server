@@ -4,8 +4,8 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { normalizeChapter } from '../../../services/reference/reference-service.js';
-import { readCursor } from '../../../services/tariffs/pagination.js';
+import { CHAPTER_INPUT, normalizeChapter } from '../../../services/reference/reference-service.js';
+import { pageNotice, readCursor } from '../../../services/tariffs/pagination.js';
 import { TariffService } from '../../../services/tariffs/tariff-service.js';
 import { getUsitcService } from '../../../services/usitc/usitc-service.js';
 import { enrichmentTrailer, formatSourceData } from '../reply.js';
@@ -18,8 +18,11 @@ export const browseChapterTool = tool('usitc_browse_chapter', {
     'Browse numbered headings with complete distinct eight-digit rate-line relationships and independent ten-digit statistical counts. A unique combined ten-digit source row can establish an absent eight-digit relationship. Published subchapter titles group following headings when present. Chapters 98 and 99 expose actual published entries without synthetic four-digit headings; grouping is unavailable without sourced markers. Reserved chapters can return a successful empty collection.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    chapter: z.string().describe('Chapter 01–99, accepting one or two digits.'),
-    ...paginationInputShape,
+    chapter: z
+      .string()
+      .regex(CHAPTER_INPUT.pattern, CHAPTER_INPUT.message)
+      .describe('Chapter 01–99, accepting one or two digits.'),
+    ...paginationInputShape(25),
   }),
   output: z.object({
     ...metadataShape,
@@ -56,7 +59,7 @@ export const browseChapterTool = tool('usitc_browse_chapter', {
     {
       reason: 'invalid_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Chapter is outside 01–99 or has invalid syntax.',
+      when: 'Chapter is 0 or 00, outside 01–99.',
       recovery: 'Call usitc_list_reference with topic chapters and use one chapter number.',
       thrownBy: 'service',
     },
@@ -102,7 +105,8 @@ export const browseChapterTool = tool('usitc_browse_chapter', {
       ctx,
     );
     ctx.enrich.total(result.page.total);
-    if (notice) ctx.enrich.notice(notice);
+    const message = pageNotice(notice, input.limit);
+    if (message) ctx.enrich.notice(message);
     return result;
   },
   format: formatSourceData,

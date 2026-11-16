@@ -671,6 +671,8 @@ describe('passages and fragments', () => {
       parsedListBlocks: 1,
       unmappedEvidenceCount: 0,
     });
-    expect(result.coverage.limitations.length).toBeGreaterThan(0);
+    expect(result.coverage.limitations).toContain(
+      'No candidate list, empty or not, establishes that no additional duty applies.',
+    );
   });
 });

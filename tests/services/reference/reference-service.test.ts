@@ -4,7 +4,7 @@
  */
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
-import { column2Countries } from '@/services/reference/program-data.js';
+import { column2Countries, verifiedEditions } from '@/services/reference/program-data.js';
 import {
   assessCountry,
   listChapterReferences,
@@ -13,6 +13,7 @@ import {
   listQuantityUnits,
   normalizeChapter,
   normalizeCode,
+  normalizeCodePrefix,
   normalizeCountryCode,
   normalizeSearchQuery,
   parseSpecialCell,
@@ -66,6 +67,15 @@ describe('HTS identifiers and countries', () => {
     );
     expect(normalizeCode('01012100', [8, 10]).length).toBe(8);
   });
+  it.each([
+    [[8, 10], '0101', 'Use an HTS identifier containing 8 or 10 digits.'],
+    [[4, 6, 8], '0101210010', 'Use an HTS identifier containing 4, 6 or 8 digits.'],
+    [[8], '010121', 'Use an HTS identifier containing 8 digits.'],
+  ] as const)('names the permitted lengths %j as a disjunction', (lengths, input, message) => {
+    expect(() => normalizeCode(input, lengths)).toThrowError(
+      expect.objectContaining({ message, data: { reason: 'invalid_code' } }),
+    );
+  });
   it('normalizes chapter boundaries and keeps reserved chapter 77 valid', () => {
     expect(['1', ' 09 ', '77', '99'].map(normalizeChapter)).toEqual(['01', '09', '77', '99']);
     for (const input of ['0', '00', '100', '1.0', '-1', ''])
@@ -91,9 +101,20 @@ describe('HTS identifiers and countries', () => {
     expect(normalizeSearchQuery(' 0101210010 ')).toBe('0101.21.00.10');
     expect(normalizeSearchQuery(' lithium-ion 8507 batteries ')).toBe('lithium-ion 8507 batteries');
     expect(normalizeSearchQuery('8507.6')).toBe('8507.6');
-    expect(() => normalizeSearchQuery(' ')).toThrowError(
-      expect.objectContaining({ code: JsonRpcErrorCode.ValidationError }),
-    );
+  });
+  it.each([
+    [undefined, undefined],
+    ['', undefined],
+    ['   ', undefined],
+    [' 61 ', '61'],
+    ['01', '01'],
+    ['6109', '6109'],
+    ['610910', '6109.10'],
+    ['6109.10', '6109.10'],
+    ['61091000', '6109.10.00'],
+    ['\t6109.10.00\n', '6109.10.00'],
+  ])('normalizes code prefix %j to %j', (input, prefix) => {
+    expect(normalizeCodePrefix(input)).toBe(prefix);
   });
 });
 
@@ -113,7 +134,7 @@ describe('reviewed reference facts', () => {
     ]);
   });
   it('contains every GN3 symbol as a distinct literal including suffixes', () => {
-    const programs = listProgramReferences();
+    const { decoder, items: programs } = listProgramReferences();
     expect(programs.map((program) => program.symbol)).toEqual([
       'A',
       'A*',
@@ -145,15 +166,32 @@ describe('reviewed reference facts', () => {
       'S',
       'S+',
     ]);
-    expect(programs.find((program) => program.symbol === 'S+')).toMatchObject({
+    expect(programs.find((program) => program.symbol === 'S+')).toEqual({
+      kind: 'program',
+      symbol: 'S+',
       name: 'United States-Mexico-Canada Agreement',
-      citation: 'General Note 3(c)(i)',
-      sourceEdition: '2026HTSRev21',
       countryListCoverage: 'unknown',
     });
-    expect(programs.every((program) => program.sourceUrl.includes('release=2026HTSRev21'))).toBe(
-      true,
-    );
+    expect(
+      programs.every(
+        (program) => Object.keys(program).join() === 'kind,symbol,name,countryListCoverage',
+      ),
+    ).toBe(true);
+    expect(decoder).toEqual({
+      sourceEdition: '2026HTSRev21',
+      citation: 'General Note 3(c)(i)',
+      sourceUrl:
+        'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
+      conditionality: 'All legal requirements of the program must be met; General Note 3(a)(iii).',
+      qualificationNotice:
+        'Program identification does not establish origin qualification, product eligibility, quota status, program availability or the legally applicable rate.',
+    });
+    expect(parseSpecialCell('Free (A)').decoder).toEqual({
+      sourceEdition: decoder.sourceEdition,
+      citation: decoder.citation,
+      sourceUrl: decoder.sourceUrl,
+      qualificationNotice: decoder.qualificationNotice,
+    });
   });
   it('publishes all 99 chapter navigation labels with reserved and source spelling intact', () => {
     const chapters = listChapterReferences();
@@ -174,20 +212,23 @@ describe('reviewed reference facts', () => {
     expect(chapters.find((chapter) => chapter.chapter === '15')!.label).toContain('microvial');
   });
   it('retains published GN3 units and distinguishes code precision semantics', () => {
-    const units = listQuantityUnits();
+    const { decoder, items: units } = listQuantityUnits();
     expect(units).toHaveLength(54);
+    expect(decoder).toEqual({
+      sourceEdition: '2026HTSRev21',
+      citation: 'General Note 3(g)',
+      sourceUrl:
+        'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
+    });
     expect(units).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          symbol: 'kg',
-          meaning: 'kilograms',
-          citation: 'General Note 3(g)',
-        }),
+        { kind: 'unit', symbol: 'kg', meaning: 'kilograms' },
         expect.objectContaining({ symbol: 'm²', meaning: 'square meters' }),
         expect.objectContaining({ symbol: 'C', meaning: 'Celcius' }),
         expect.objectContaining({ symbol: '¢', meaning: 'cents' }),
       ]),
     );
+    expect(units.every((unit) => Object.keys(unit).join() === 'kind,symbol,meaning')).toBe(true);
     expect(listIdentifierReferences().map(({ name, digits }) => [name, digits])).toEqual([
       ['heading', 4],
       ['subheading', 6],
@@ -221,7 +262,7 @@ describe('Special clause interpretation', () => {
     'retains pinned provenance with unknown listing on edition mismatch for %s',
     (country) => {
       const parsed = parseSpecialCell('', country);
-      expect(assessCountry(parsed, country, '2026HTSRev22')).toMatchObject({
+      expect(assessCountry(parsed, country, '2026HTSRev24')).toMatchObject({
         decoderSourceEdition: '2026HTSRev21',
         editionMatches: false,
         column2Listing: {
@@ -231,6 +272,98 @@ describe('Special clause interpretation', () => {
           sourceUrl:
             'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
         },
+        notice:
+          'Column 2 listing is unknown because the current edition differs from the reviewed General Note 3(b) source. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.',
+      });
+    },
+  );
+  it('lists exactly the editions verified to carry the reviewed General Note 3 text', () => {
+    expect(verifiedEditions).toEqual(['2026HTSRev22', '2026HTSRev23']);
+  });
+  it('keeps every reviewed-edition assessment byte-identical', () => {
+    const parsed = parseSpecialCell('Free (S, S+)', 'RU');
+    const pinned = {
+      eligibility: 'not_determined',
+      columnSelection: 'not_determined',
+      membershipCoverage: 'unknown',
+      decoderSourceEdition: '2026HTSRev21',
+      editionMatches: true,
+      recognizedSymbolCount: 2,
+      qualificationNotice:
+        'Program identification does not establish origin qualification, product eligibility, quota status, program availability or the legally applicable rate.',
+    };
+    const listing = {
+      citation: 'General Note 3(b)',
+      sourceEdition: '2026HTSRev21',
+      sourceUrl:
+        'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
+    };
+    const matchedNotice =
+      'Column 2 listing reports only membership in the edition-pinned General Note 3(b) list. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.';
+    expect(assessCountry(parsed, 'RU', '2026HTSRev21')).toEqual({
+      countryCode: 'RU',
+      column2Listing: { status: 'listed', ...listing },
+      ...pinned,
+      notice: matchedNotice,
+    });
+    expect(assessCountry(parsed, 'CN', '2026HTSRev21')).toEqual({
+      countryCode: 'CN',
+      column2Listing: { status: 'not_listed', ...listing },
+      ...pinned,
+      notice: matchedNotice,
+    });
+    expect(assessCountry(parsed, undefined, '2026HTSRev21')).toEqual({
+      ...pinned,
+      notice:
+        'No country was requested. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.',
+    });
+  });
+  it.each(
+    ['2026HTSRev22', '2026HTSRev23'].flatMap((edition) =>
+      [
+        ['BY', 'listed'],
+        ['CU', 'listed'],
+        ['KP', 'listed'],
+        ['RU', 'listed'],
+        ['CN', 'not_listed'],
+      ].map(([country, status]) => ({ edition, country, status })),
+    ),
+  )(
+    'reports $country as $status for verified edition $edition without relabeling provenance',
+    ({ edition, country, status }) => {
+      const parsed = parseSpecialCell('Free (S)', country);
+      const assessment = assessCountry(parsed, country, edition);
+      expect(assessment).toEqual({
+        countryCode: country,
+        column2Listing: {
+          status,
+          citation: 'General Note 3(b)',
+          sourceEdition: '2026HTSRev21',
+          sourceUrl:
+            'https://hts.usitc.gov/reststop/file?release=2026HTSRev21&filename=General%20Note%203',
+        },
+        eligibility: 'not_determined',
+        columnSelection: 'not_determined',
+        membershipCoverage: 'unknown',
+        decoderSourceEdition: '2026HTSRev21',
+        editionMatches: true,
+        recognizedSymbolCount: 1,
+        notice: `Column 2 listing reports only membership in the General Note 3(b) list reviewed in 2026HTSRev21, whose text was verified unchanged in ${edition}. Special-program country membership has not been independently verified. General and Column 2 selection remain unresolved.`,
+        qualificationNotice:
+          'Program identification does not establish origin qualification, product eligibility, quota status, program availability or the legally applicable rate.',
+      });
+      expect(Object.keys(assessment)).toEqual(
+        Object.keys(assessCountry(parsed, country, '2026HTSRev21')),
+      );
+    },
+  );
+  it.each(['2026HTSRev20', '2026HTSRev24', '2026htsrev23', ' 2026HTSRev23'])(
+    'keeps an unverified or inexact edition name %j unknown',
+    (edition) => {
+      const parsed = parseSpecialCell('', 'RU');
+      expect(assessCountry(parsed, 'RU', edition)).toMatchObject({
+        editionMatches: false,
+        column2Listing: { status: 'unknown', sourceEdition: '2026HTSRev21' },
       });
     },
   );

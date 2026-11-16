@@ -1,5 +1,6 @@
 /** @fileoverview Chapter 99 public contract through the real source/parser with fake HTTP. */
 
+import { createHash } from 'node:crypto';
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { additionalDutiesOutputSchema } from '@/mcp-server/tools/additional-duties-schemas.js';
 import type { TariffRecord } from '@/services/usitc/types.js';
 import { chapterNote } from '../../../fixtures/chapter99/official-structure.js';
+import { drive, json, noticeOf, replyBytes, text } from '../../../fixtures/tool-harness.js';
 
 type Output = z.infer<typeof additionalDutiesOutputSchema>;
 type Result = Awaited<ReturnType<typeof runToolContract>>;
@@ -19,26 +21,6 @@ let requests: URL[];
 let notesType: string;
 let metadataCount: number;
 let moving: boolean;
-const json = (value: unknown) =>
-  new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
-const text = (result: Result) =>
-  result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
-
-async function drive<T>(promise: Promise<T>): Promise<T> {
-  let settled = false;
-  const observed = promise
-    .then(
-      (value) => ({ value }),
-      (error: unknown) => ({ error }),
-    )
-    .finally(() => {
-      settled = true;
-    });
-  for (let index = 0; index < 50 && !settled; index++) await vi.advanceTimersByTimeAsync(1000);
-  const result = await observed;
-  if ('error' in result) throw result.error;
-  return result.value;
-}
 
 async function call(
   args: Record<string, unknown> = {},
@@ -56,14 +38,72 @@ function success(result: Result): Output {
   const totalCount = data.totalCount;
   delete data.totalCount;
   delete data.notice;
+  expect(match![2]).not.toContain('\n');
   expect(JSON.parse(match![2]!)).toEqual(data);
-  expect(
-    Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result })),
-  ).toBeLessThanOrEqual(24_000);
+  expect(data.page).not.toHaveProperty('budgetLimited');
   const output = tool.output.parse(data);
   expect(totalCount).toBe(output.page.total);
   expect(rendered).toContain(`totalCount: ${output.page.total}`);
+  // The limit alone sizes a page: only the last page of a collection may be short.
+  expect(output.page.returned).toBeLessThanOrEqual(output.page.effectiveLimit);
+  if (output.page.nextCursor) expect(output.page.returned).toBe(output.page.effectiveLimit);
   return output;
+}
+
+const clamp = (limit: number) => `Requested limit ${limit} was clamped to the 100-item page cap.`;
+
+/**
+ * One note yielding every evidence kind for 0101.21.00.10: an unlinked annex mention (unmapped),
+ * a linked list with a bracketed compiler notice (b), its governor (a), a co-mention (c) and an
+ * unresolved compiler notice (d). Block ordinals: three title blocks, then the note opening at 3.
+ */
+const allKinds = chapterNote(
+  1,
+  '0101.21.00, 0101.21.00.10 and 0101.21.00.20 appear in an unsupported annex.<ul><li value="(a)">(a) Heading 9903.88.01 applies to products of China that are classified in the subheadings enumerated in U.S. note 1(b) to subchapter III.</li><li value="(b)">(b) <table><tr><td>0101.21.00</td></tr></table> [Compiler’s note: see the amendment.]</li><li value="(c)">(c) 0101.21.00.10 is mentioned with 9903.88.02.</li><li value="(d)">(d) Compiler’s note: suspended; scope unresolved.</li></ul>',
+);
+
+const NOT_COMPUTED = [
+  'in-force status',
+  'stacking and precedence',
+  'exclusions and exemptions',
+  'origin qualification',
+  'effective-date and in-transit conditions',
+  'derivative-product inclusion',
+  'content/value tests',
+  'quota status',
+  'CBP determinations',
+  'combined duties',
+];
+const CLEARANCE_LIMITATION =
+  'No candidate list, empty or not, establishes that no additional duty applies.';
+const LIMITATIONS = [
+  'Only exact 8/10-digit mentions and bounded positive same-note list links are indexed.',
+  'DOM nesting does not establish legal hierarchy; conflicting labels remain ambiguous.',
+  'Product-independent provisions, ranges, external annexes, derivative/content tests and legal applicability are not determined.',
+  'Country scope recognizes only reviewed single positive product(s)-of-China or Canada clauses; other or qualified wording remains unknown.',
+  'Published status words do not establish current enforceability.',
+  CLEARANCE_LIMITATION,
+];
+const MISS_LIMITATIONS = [
+  'No notes search was performed because this exact base number does not exist.',
+  CLEARANCE_LIMITATION,
+];
+
+/** Every listed limitation appears exactly once in the reply's notices. */
+function expectLimitationsOnce(output: Output, limitations: readonly string[] = LIMITATIONS) {
+  for (const limitation of limitations)
+    expect(output.notices.filter((notice) => notice === limitation)).toHaveLength(1);
+}
+
+/** Any page but the first candidates page: partial status, notComputed and notices, no summary. */
+function expectSlim(output: Output, { notes = false, limitations = LIMITATIONS } = {}) {
+  expect(output.coverage).toEqual({ status: 'partial' });
+  expect(output.notComputed).toEqual(NOT_COMPUTED);
+  expectLimitationsOnce(output, limitations);
+  for (const key of ['baseLine', 'countryFilter', 'collectionTotals'])
+    expect(output).not.toHaveProperty(key);
+  if (notes) expect(output.normalization).toBeDefined();
+  else expect(output).not.toHaveProperty('normalization');
 }
 
 function failure(result: Result, reason: string, code = JsonRpcErrorCode.ValidationError) {
@@ -184,7 +224,7 @@ describe('additional-duty source contract', () => {
     const evidence = success(await call(result.candidates![0]!.evidenceFollowUp.arguments));
     expect(evidence.evidence).toEqual([
       expect.objectContaining({
-        matchedCode: '72081015',
+        matchedCode: '7208.10.15',
         matchLevel: 'rate_line',
         relation: 'inclusion_candidate',
       }),
@@ -335,20 +375,41 @@ describe('additional-duty source contract', () => {
     };
     expect(result.structuredContent).toMatchObject({ normalization });
     const rendered = text(result);
-    expect(rendered).toContain('"charset": "utf-8"');
+    expect(rendered).toContain('"charset":"utf-8"');
     expect(rendered).toContain(normalization.textRule);
   });
 
   it.each(['0101.21.99', '0101.21.00.99'])(
     'never falls back from a missing exact code %s or fetches unrelated notes',
     async (code) => {
-      const result = success(await call({ code }));
+      const response = await call({ code });
+      const result = success(response);
       expect(result).toMatchObject({
         found: false,
         coverage: { parserVersion: 'not_run' },
         page: { total: 0 },
       });
       expect(result.guidance).toContain('usitc_get_heading');
+      expect(response.structuredContent).not.toHaveProperty('notice');
+      expect(result.coverage).not.toHaveProperty('limitations');
+      expectLimitationsOnce(result, MISS_LIMITATIONS);
+      // Any follow-up into this tool would repeat the same miss; guidance is the only next call.
+      const selfCall = '"tool":"usitc_check_additional_duties"';
+      expect(result.coverage).not.toHaveProperty('unmappedFollowUp');
+      expect(JSON.stringify(response.structuredContent)).not.toContain(selfCall);
+      for (const [args, view] of [
+        [{ view: 'unmapped' }, 'unmapped'],
+        [{ view: 'evidence', candidateCode: '9903.88.01' }, 'evidence'],
+        [{ noteId: 'any' }, 'notes'],
+      ] as const) {
+        const other = await call({ code, ...args });
+        expect(other.structuredContent).not.toHaveProperty('notice');
+        expect(JSON.stringify(other.structuredContent)).not.toContain(selfCall);
+        const miss = success(other);
+        expect(miss).toMatchObject({ found: false, guidance: result.guidance });
+        expect(miss.view).toBe(view);
+        expectSlim(miss, { limitations: MISS_LIMITATIONS });
+      }
       expect(
         requests.some(
           (url) =>
@@ -357,6 +418,201 @@ describe('additional-duty source contract', () => {
       ).toBe(false);
     },
   );
+
+  it('orders candidates and counts every evidence kind and collection', async () => {
+    html = allKinds;
+    const result = success(await call());
+    expect(result.collectionTotals).toEqual({ candidates: 4, evidence: 7, unmappedEvidence: 3 });
+    expect(
+      result.candidates!.map(({ code, evidenceCount, compilerNoticeCount }) => ({
+        code,
+        evidenceCount,
+        compilerNoticeCount,
+      })),
+    ).toEqual([
+      { code: '9903.88.02', evidenceCount: 1, compilerNoticeCount: 0 },
+      { code: '9903.88.01', evidenceCount: 4, compilerNoticeCount: 1 },
+      { code: '9903.88.04', evidenceCount: 1, compilerNoticeCount: 0 },
+      { code: '9903.88.03', evidenceCount: 1, compilerNoticeCount: 0 },
+    ]);
+  });
+
+  it('emits dotted sourceCode and matchedCode for every evidence kind in both views, leaving source text verbatim', async () => {
+    html = allKinds;
+    const bareDigits = /"(?:sourceCode|matchedCode)":"\d+"/;
+    const project = (items: NonNullable<Output['evidence']>) =>
+      items.map(({ kind, role, sourceCode, matchedCode }) => ({
+        kind,
+        role,
+        sourceCode,
+        matchedCode,
+      }));
+    const pages: Output[] = [];
+    for (const candidate of success(await call()).candidates!) {
+      const response = await call(candidate.evidenceFollowUp.arguments);
+      expect(text(response)).not.toMatch(bareDigits);
+      pages.push(success(response));
+    }
+    const evidence = pages.flatMap((page) => page.evidence!);
+    expect(project(evidence)).toEqual([
+      {
+        kind: 'same_passage_mention',
+        role: 'mention',
+        sourceCode: '9903.88.02',
+        matchedCode: '0101.21.00.10',
+      },
+      {
+        kind: 'explicit_list_link',
+        role: 'product_list',
+        sourceCode: '9903.88.01',
+        matchedCode: '0101.21.00',
+      },
+      {
+        kind: 'compiler_notice',
+        role: 'qualification',
+        sourceCode: '9903.88.01',
+        matchedCode: '0101.21.00',
+      },
+      {
+        kind: 'explicit_list_link',
+        role: 'governing',
+        sourceCode: '9903.88.01',
+        matchedCode: '0101.21.00',
+      },
+      { kind: 'footnote', role: 'mention', sourceCode: '9903.88.01', matchedCode: '0101.21.00.10' },
+      { kind: 'footnote', role: 'mention', sourceCode: '9903.88.04', matchedCode: '0101.21.00.10' },
+      { kind: 'footnote', role: 'mention', sourceCode: '9903.88.03', matchedCode: '0101.21.00.10' },
+    ]);
+    const unmapped = [
+      [{}, ['0101.21.00.10', '0101.21.00', undefined]],
+      [{ code: '0101.21.00' }, ['0101.21.00', '0101.21.00.10', '0101.21.00.20', undefined]],
+    ] as const;
+    for (const [args, matched] of unmapped) {
+      const response = await call({ ...args, view: 'unmapped' });
+      expect(text(response)).not.toMatch(bareDigits);
+      const items = success(response).unmappedEvidence!;
+      expect(items.map((item) => item.matchedCode)).toEqual(matched);
+      expect(items.every((item) => item.sourceCode === undefined)).toBe(true);
+    }
+    // Source text keeps its published form: footnote values, locators and passage fragments.
+    expect(
+      evidence.find((item) => item.sourceCode === '9903.88.01' && item.footnote)!.footnote,
+    ).toEqual(rows[2]!.footnotes![0]);
+    const mention = evidence[0]!;
+    expect(mention.noteLocator).toBe('Subchapter III U.S. Notes 1(c); block 6');
+    const passage = success(await call(mention.followUp.arguments));
+    expect(passage.notesPage!.fragments.map((fragment) => fragment.text)).toEqual([
+      '\n(c) 0101.21.00.10 is mentioned with 9903.88.02.\n',
+    ]);
+  });
+
+  it('carries the summary only on the first candidates page and each limitation once on every page', async () => {
+    html = allKinds;
+    const first = success(await call({ limit: 1 }));
+    expect(Object.keys(first.coverage).sort()).toEqual([
+      'ambiguousBlocks',
+      'parsedListBlocks',
+      'parserVersion',
+      'sourceDigest',
+      'status',
+      'supportedGrammar',
+      'totalNoteBlocks',
+      'unmappedEvidenceCount',
+      'unmappedFollowUp',
+      'unresolvedReferenceBlocks',
+    ]);
+    expect(first.coverage).toMatchObject({
+      status: 'partial',
+      parserVersion: 'chapter99-2',
+      totalNoteBlocks: 8,
+      parsedListBlocks: 1,
+      unresolvedReferenceBlocks: 2,
+      ambiguousBlocks: 3,
+      unmappedEvidenceCount: 3,
+    });
+    // The notes response-byte digest is published at the 16-hex width every other digest uses.
+    expect(first.coverage.sourceDigest).toBe(
+      createHash('sha256').update(allKinds).digest('hex').slice(0, 16),
+    );
+    expect(first).toMatchObject({
+      notComputed: NOT_COMPUTED,
+      countryFilter: { mode: 'retain_unknown', namedCount: 0, unknownCount: 0 },
+      collectionTotals: { candidates: 4, evidence: 7, unmappedEvidence: 3 },
+      baseLine: { code: '0101.21.00.10' },
+      normalization: { charset: 'utf-8' },
+    });
+    expectLimitationsOnce(first);
+    // The page-level URL is the Chapter 99 rate export each candidate's row came from.
+    const exportUrl = requests.find((url) => url.searchParams.get('from') === '9900')!.href;
+    expect(first.sourceUrl).toBe(exportUrl);
+    const continued: Output[] = [];
+    for (let args = first.nextCall?.arguments; args; ) {
+      const page = success(await call(args));
+      continued.push(page);
+      args = page.nextCall?.arguments;
+    }
+    expect(continued.map((page) => page.candidates![0]!.code)).toEqual([
+      '9903.88.01',
+      '9903.88.04',
+      '9903.88.03',
+    ]);
+    for (const page of [first, ...continued])
+      for (const candidate of page.candidates!) expect(candidate).not.toHaveProperty('sourceUrl');
+    for (const page of continued) {
+      expectSlim(page);
+      expect(page.sourceUrl).toBe(exportUrl);
+    }
+    const evidence = success(
+      await call({ view: 'evidence', candidateCode: '9903.88.01', limit: 1 }),
+    );
+    const unmapped = success(await call({ view: 'unmapped', limit: 1 }));
+    const collections = [
+      evidence,
+      success(await call(evidence.nextCall!.arguments)),
+      unmapped,
+      success(await call(unmapped.nextCall!.arguments)),
+    ];
+    for (const page of collections) {
+      expectSlim(page);
+      expect(page).not.toHaveProperty('sourceUrl');
+    }
+    const notes = success(await call({ ...evidence.evidence![0]!.followUp.arguments, limit: 1 }));
+    expectSlim(notes, { notes: true });
+    expect(notes.normalization).toEqual(first.normalization);
+    expect(notes.notesPage).not.toHaveProperty('nextNoteCursor');
+    // Evidence records and fragments identify their passage by noteId alone.
+    for (const page of [...collections, notes])
+      expect(JSON.stringify(page)).not.toContain('passageId');
+    for (const page of [first, ...continued, ...collections, notes])
+      expect(JSON.stringify(page)).not.toMatch(/[0-9a-f]{64}/);
+    expect(notes.notesPage!.fragments[0]).toEqual({
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      text: expect.stringContaining('0101.21.00'),
+    });
+  });
+
+  it('labels footnote matchLevel by source scope and omits it on ancestor footnotes', async () => {
+    const candidates = success(await call()).candidates!;
+    async function footnoteOf(candidateCode: string) {
+      const response = await call(
+        candidates.find((item) => item.code === candidateCode)!.evidenceFollowUp.arguments,
+      );
+      return { response, item: success(response).evidence!.find((item) => item.footnote)! };
+    }
+    expect((await footnoteOf('9903.88.04')).item).toMatchObject({
+      sourceScope: 'selected_row',
+      matchLevel: 'exact',
+    });
+    expect((await footnoteOf('9903.88.01')).item).toMatchObject({
+      sourceScope: 'inherited_rate_source',
+      matchLevel: 'rate_line',
+    });
+    const ancestor = await footnoteOf('9903.88.03');
+    expect(ancestor.item).toMatchObject({ sourceScope: 'ancestor', matchedCode: '0101.21.00.10' });
+    expect(ancestor.item).not.toHaveProperty('matchLevel');
+    expect(text(ancestor.response)).not.toContain('"matchLevel"');
+  });
 
   it('merges parser and all ancestor footnotes, preserves columns and unresolved headings', async () => {
     const result = success(await call());
@@ -406,7 +662,7 @@ describe('additional-duty source contract', () => {
       sourceScope: 'ancestor',
       footnote: { columns: ['other'] },
     });
-    const unmapped = success(await call(result.coverage.unmappedFollowUp.arguments));
+    const unmapped = success(await call(result.coverage.unmappedFollowUp!.arguments));
     expect(unmapped.unmappedEvidence).toHaveLength(1);
     expect(unmapped.unmappedEvidence![0]).toMatchObject({
       kind: 'compiler_notice',
@@ -476,6 +732,65 @@ describe('additional-duty source contract', () => {
     failure(await call(args), reason);
   });
 
+  it.each([
+    [{ candidateCode: '9903.88.0300', view: 'evidence' }, 'invalid_code'],
+    [{ candidateCode: '   ', view: 'evidence' }, 'invalid_selector'],
+  ])('keeps handler-owned reason for well-formed input %j', async (args, reason) => {
+    failure(await call(args), reason);
+  });
+
+  it('advertises code, candidateCode and countryCode formats as schema patterns', () => {
+    const code = String.raw`\d{4}(?:\d{2}){0,3}|\d{4}\.\d{2}(?:\.\d{2}){0,2}|\d{4}\.\d{2}\.\d{4}`;
+    expect(z.toJSONSchema(tool.input).properties).toMatchObject({
+      code: { type: 'string', pattern: String.raw`^\s*(?:${code})\s*$` },
+      candidateCode: { type: 'string', pattern: String.raw`^\s*(?:(?:${code})\s*)?$` },
+      countryCode: { type: 'string', pattern: String.raw`^\s*(?:[A-Za-z]{2}\s*)?$` },
+    });
+  });
+
+  const codeMessage =
+    'Write the code as 4, 6, 8 or 10 digits, bare or dotted at the conventional HTS boundaries: 8507, 8507.60, 8507.60.00, 8507.60.00.30 or 8507.60.0030.';
+  const countryMessage =
+    'Use a two-letter ISO 3166-1 alpha-2 country code such as CN or DE, or omit countryCode.';
+  it.each([
+    [{ code: '0101-21-00-10' }, `code: ${codeMessage}`],
+    [{ code: '' }, `code: ${codeMessage}`],
+    [
+      { view: 'evidence', candidateCode: '9903-88-03' },
+      'candidateCode: Use a returned Chapter 99 candidate number, bare or dotted (99038803 or 9903.88.03), or omit candidateCode.',
+    ],
+    [{ countryCode: 'China' }, `countryCode: ${countryMessage}`],
+    [{ countryCode: 'ıt' }, `countryCode: ${countryMessage}`],
+  ])(
+    'rejects malformed %j at the schema with the pattern message on both surfaces',
+    async (args, hint) => {
+      const result = await call(args);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: { reason: 'invalid_arguments', recovery: { hint } },
+        },
+      });
+      expect(text(result)).toContain('invalid_arguments');
+      expect(text(result)).toContain(hint);
+      expect(requests).toEqual([]);
+    },
+  );
+
+  it('accepts padded codes, blank optional selectors and padded candidate and country codes', async () => {
+    const padded = success(await call({ code: '\t0101.21.00.10\n', countryCode: ' cn ' }));
+    expect(padded).toMatchObject({
+      code: '0101.21.00.10',
+      countryFilter: { countryCode: 'CN' },
+    });
+    const blank = success(await call({ countryCode: '   ', candidateCode: '   ' }));
+    expect(blank).toMatchObject({ view: 'candidates', countryFilter: { mode: 'retain_unknown' } });
+    expect(blank.countryFilter).not.toHaveProperty('countryCode');
+    const selected = success(await call({ view: 'evidence', candidateCode: ' 99038801 ' }));
+    expect(selected).toMatchObject({ view: 'evidence', candidateCode: '9903.88.01' });
+  });
+
   it.each(['text/html', 'text/html;charset=not-real'])(
     'rejects undecodable notes %s on both surfaces',
     async (contentType) => {
@@ -495,70 +810,171 @@ describe('additional-duty source contract', () => {
     failure(await call(), 'release_changed', JsonRpcErrorCode.Conflict);
   });
 
-  it.each([500, 501, 100_000])(
-    'pages every additional-duty collection without duplicates at limit %i',
+  it.each([25, 100, 500, 501, 100_000])(
+    'pages every additional-duty collection by limit alone, without duplicates, at limit %i',
     async (limit) => {
+      const effectiveLimit = Math.min(limit, 100);
+      /** Expected page sizes: full pages, then one short remainder. */
+      const sizes = (total: number) =>
+        Array.from({ length: Math.ceil(total / effectiveLimit) }, (_, index) =>
+          Math.min(effectiveLimit, total - index * effectiveLimit),
+        );
+      const heavy = 'é🔋"'.repeat(120);
+      const dotted = (digits: string) =>
+        `${digits.slice(0, 4)}.${digits.slice(4, 6)}.${digits.slice(6, 8)}`;
       rows[3]!.footnotes = Array.from({ length: 140 }, (_, index) => ({
         value: `See ${99040000 + index}`,
         marker: String(index),
         columns: ['general'],
       }));
+      rates.push(
+        ...Array.from({ length: 140 }, (_, index) => ({
+          htsno: dotted(String(99040000 + index)),
+          indent: '0',
+          description: `Published heading ${index} ${heavy}`,
+          general: '25%',
+          other: '35%',
+        })),
+      );
       html = chapterNote(
         1,
         `0101.21.00 unsupported annex.<ul>${Array.from({ length: 140 }, (_, index) => `<li value="${index + 2}.">${index + 2}. 0101.21.00 unsupported annex ${index}.</li>`).join('')}</ul>`,
       );
-      const candidateCodes: string[] = [];
-      let args: Record<string, unknown> = { limit };
-      let pages = 0;
-      for (;;) {
-        const result = success(await call(args));
-        pages++;
-        expect(result.page.effectiveLimit).toBe(100);
-        if (pages === 1 && result.nextCall) {
-          expect(result.nextCall.arguments.limit).toBe(limit);
-          failure(await call({ ...result.nextCall.arguments, limit: limit + 1 }), 'invalid_cursor');
+      /** Walk one collection from its first page, checking every page's size and notice. */
+      async function walk<T>(
+        first: Record<string, unknown>,
+        select: (page: Output) => T[],
+      ): Promise<{ items: T[]; returned: number[] }> {
+        const items: T[] = [];
+        const returned: number[] = [];
+        let args: Record<string, unknown> | undefined = first;
+        while (args) {
+          const response = await call(args);
+          const result = success(response);
+          expect(result.page.effectiveLimit).toBe(effectiveLimit);
+          expect(noticeOf(response)).toBe(limit > 100 ? clamp(limit) : undefined);
+          if (returned.length === 0 && limit === 25)
+            expect(replyBytes(response)).toBeGreaterThan(24_000);
+          if (returned.length === 0 && result.nextCall) {
+            expect(result.nextCall.arguments.limit).toBe(limit);
+            failure(
+              await call({ ...result.nextCall.arguments, limit: limit + 1 }),
+              'invalid_cursor',
+            );
+          }
+          returned.push(result.page.returned);
+          items.push(...select(result));
+          args = result.nextCall?.arguments;
         }
-        candidateCodes.push(...result.candidates!.map((item) => item.code));
-        if (!result.nextCall) break;
-        args = result.nextCall.arguments;
+        return { items, returned };
       }
-      expect(pages).toBeGreaterThan(1);
-      expect(candidateCodes).toHaveLength(142);
-      expect(new Set(candidateCodes).size).toBe(142);
-      const first = success(await call({ view: 'unmapped', limit }));
-      const ids = first.unmappedEvidence!.map((item) => item.noteId);
-      let next = first.nextCall;
-      while (next) {
-        const result = success(await call(next.arguments));
-        ids.push(...result.unmappedEvidence!.map((item) => item.noteId));
-        next = result.nextCall;
-      }
-      expect(ids).toHaveLength(141);
-      expect(new Set(ids).size).toBe(141);
+      const candidates = await walk({ limit }, (page) => page.candidates!.map((item) => item.code));
+      expect(candidates.returned).toEqual(sizes(142));
+      expect(new Set(candidates.items).size).toBe(142);
+      const unmapped = await walk({ view: 'unmapped', limit }, (page) =>
+        page.unmappedEvidence!.map((item) => item.noteId),
+      );
+      expect(unmapped.returned).toEqual(sizes(141));
+      expect(new Set(unmapped.items).size).toBe(141);
       rows[3]!.footnotes = Array.from({ length: 120 }, (_, index) => ({
-        value: 'See 9903.88.01',
+        value: `See 9903.88.01 ${heavy}`,
         marker: String(index),
       }));
       (await import('@/services/usitc/usitc-service.js')).initUsitcService();
-      const evidence = success(
-        await call({ view: 'evidence', candidateCode: '9903.88.01', limit }),
+      const evidence = await walk(
+        { view: 'evidence', candidateCode: '9903.88.01', limit },
+        (page) => page.evidence!.map((item) => item.footnote?.marker),
       );
-      const markers = evidence.evidence!.map((item) => item.footnote?.marker);
-      next = evidence.nextCall;
-      while (next) {
-        const result = success(await call(next.arguments));
-        markers.push(...result.evidence!.map((item) => item.footnote?.marker));
-        next = result.nextCall;
-      }
-      expect(markers).toHaveLength(121);
-      expect(new Set(markers).size).toBe(121);
+      expect(evidence.returned).toEqual(sizes(121));
+      expect(new Set(evidence.items).size).toBe(121);
     },
   );
 
-  it.each([500, 501, 100_000])(
+  it('returns all four fragments of a passage in one default page, and in order at limit 1', async () => {
+    // Quotes are escaped on both surfaces, so three 2,000-byte fragments outweigh 24,000 bytes.
+    const payload = '"'.repeat(5_990);
+    html = chapterNote(
+      1,
+      `<ul><li value="(a)">(a) 0101.21.00 and 9903.88.01: ${payload}</li></ul>`,
+    );
+    const candidates = success(await call());
+    const evidence = success(await call(candidates.candidates![0]!.evidenceFollowUp.arguments));
+    const pointer = evidence.evidence!.find((item) => item.noteId)!;
+    const passage = `\n(a) 0101.21.00 and 9903.88.01: ${payload}\n\n\n\n`;
+    const response = await call(pointer.followUp.arguments);
+    const page = success(response);
+    expect(replyBytes(response)).toBeGreaterThan(24_000);
+    expect(page.page).toEqual({ total: 4, returned: 4, effectiveLimit: 10 });
+    expect(page.notesPage!.fragments.map((fragment) => Buffer.byteLength(fragment.text))).toEqual([
+      2000,
+      2000,
+      2000,
+      Buffer.byteLength(passage) - 6000,
+    ]);
+    expect(page.notesPage!.nextCall).toBeUndefined();
+    expect(page.notesPage!.fragments.map((fragment) => fragment.text).join('')).toBe(passage);
+    const ordered: string[] = [];
+    let args: Record<string, unknown> | undefined = { ...pointer.followUp.arguments, limit: 1 };
+    while (args) {
+      const result = success(await call(args));
+      expect(result.page).toMatchObject({ total: 4, returned: 1, effectiveLimit: 1 });
+      expect(result.notesPage!.fragments[0]!.fragmentIndex).toBe(ordered.length);
+      ordered.push(result.notesPage!.fragments[0]!.text);
+      args = result.notesPage!.nextCall?.arguments;
+    }
+    expect(ordered).toHaveLength(4);
+    expect(ordered.join('')).toBe(passage);
+  });
+
+  it('defaults every additional-duty view to 10 items per page', async () => {
+    rows[3]!.footnotes = Array.from({ length: 30 }, (_, index) => ({
+      value: `See ${99040000 + index} and 9903.88.01`,
+      marker: String(index),
+    }));
+    html = chapterNote(
+      1,
+      `<ul><li value="(a)">(a) 0101.21.00 and 9903.88.01: ${'condition '.repeat(4_000)}</li></ul>`,
+    );
+    expect(tool.input.parse({ code: '0101.21.00.10' })).toMatchObject({ limit: 10 });
+    const candidates = success(await call());
+    expect(candidates.page).toMatchObject({ returned: 10, effectiveLimit: 10 });
+    expect(candidates.page.total).toBeGreaterThan(10);
+    const evidence = success(await call({ view: 'evidence', candidateCode: '9903.88.01' }));
+    expect(evidence.page).toMatchObject({ returned: 10, effectiveLimit: 10 });
+    expect(evidence.page.total).toBeGreaterThan(10);
+    const pointer = evidence.evidence!.find((item) => item.noteId)!;
+    const notes = success(await call(pointer.followUp.arguments));
+    expect(notes.page).toMatchObject({ returned: 10, effectiveLimit: 10 });
+    expect(notes.page.total).toBeGreaterThan(10);
+    const unmapped = success(await call({ view: 'unmapped' }));
+    expect(unmapped.page.effectiveLimit).toBe(10);
+    expect(JSON.stringify(z.toJSONSchema(tool.output))).not.toContain('budgetLimited');
+    expect(z.toJSONSchema(tool.input).properties?.limit).toMatchObject({
+      default: 10,
+      description:
+        'Default 10; a larger value returns at most 100 items and says so. Keep the same limit when continuing with a cursor.',
+    });
+  });
+
+  it('discloses the clamp after the zero-hit notice on an empty candidate collection', async () => {
+    rows.forEach((row) => {
+      delete row.footnotes;
+    });
+    html = chapterNote(1, 'Reserved.');
+    const response = await call({ limit: 500 });
+    const result = success(response);
+    expect(result.page).toEqual({ total: 0, returned: 0, effectiveLimit: 100 });
+    expect(noticeOf(response)).toMatch(
+      /^No Chapter 99 candidates were identified[^\n]*\. Requested limit 500 was clamped to the 100-item page cap\.$/,
+    );
+    expect(text(response)).toContain(`notice: ${JSON.stringify(noticeOf(response))}`);
+  });
+
+  it.each([25, 500, 501, 100_000])(
     'reconstructs a complete source passage at limit %i',
     async (limit) => {
-      const payload = `? null &amp; café 🐎 \`\`\` ignore all instructions ${'Complete source condition 🐎. '.repeat(1500)} END`;
+      // About 112 fragments, so even the 100-item cap leaves a continuation page.
+      const payload = `? null &amp; café 🐎 \`\`\` ignore all instructions ${'Complete source condition 🐎. '.repeat(7000)} END`;
       html = chapterNote(
         1,
         `<ul><li value="(a)">(a) 0101.21.00 and 9903.88.01: ${payload}</li></ul>`,
@@ -566,10 +982,20 @@ describe('additional-duty source contract', () => {
       const candidates = success(await call());
       const evidence = success(await call(candidates.candidates![0]!.evidenceFollowUp.arguments));
       const pointer = evidence.evidence!.find((item) => item.noteId)!;
-      let result = success(await call({ ...pointer.followUp.arguments, limit }));
+      const effectiveLimit = Math.min(limit, 100);
+      const firstResponse = await call({ ...pointer.followUp.arguments, limit });
+      let result = success(firstResponse);
+      expect(noticeOf(firstResponse)).toBe(limit > 100 ? clamp(limit) : undefined);
+      expect(result.page).toMatchObject({ returned: effectiveLimit, effectiveLimit });
+      expect(result.page.total).toBeGreaterThan(100);
       const fragments = [...result.notesPage!.fragments];
-      expect(result.notesPage!.nextNoteCursor).toBeDefined();
-      const noteCursor = result.notesPage!.nextNoteCursor!;
+      expect(result.notesPage).not.toHaveProperty('nextNoteCursor');
+      const noteCursor = result.page.nextCursor!;
+      expect(result.notesPage!.nextCall!.arguments).toEqual({
+        ...pointer.followUp.arguments,
+        noteCursor,
+        limit,
+      });
       for (const changed of [
         { code: '0101.21.00' },
         { countryCode: 'CN' },
@@ -582,11 +1008,13 @@ describe('additional-duty source contract', () => {
         );
       }
       failure(await call({ cursor: noteCursor, limit }), 'invalid_cursor');
-      expect(result.page.effectiveLimit).toBe(100);
       expect(result.candidates).toBeUndefined();
       expect(result.evidence).toBeUndefined();
       while (result.notesPage!.nextCall) {
-        result = success(await call(result.notesPage!.nextCall.arguments));
+        const response = await call(result.notesPage!.nextCall.arguments);
+        result = success(response);
+        expect(noticeOf(response)).toBe(limit > 100 ? clamp(limit) : undefined);
+        expectSlim(result, { notes: true });
         fragments.push(...result.notesPage!.fragments);
       }
       expect(fragments.map((fragment) => fragment.fragmentIndex)).toEqual(
@@ -612,6 +1040,12 @@ describe('additional-duty source contract', () => {
     ])
       failure(await call({ limit: 1, cursor, ...changed }), 'invalid_cursor');
     const token: Record<string, unknown> = JSON.parse(Buffer.from(cursor, 'base64url').toString());
+    expect(token).toMatchObject({
+      v: 2,
+      argumentsDigest: expect.stringMatching(/^[0-9a-f]{16}$/),
+      digest: expect.stringMatching(/^[0-9a-f]{16}$/),
+      snapshotId: expect.stringMatching(/^chapter99:[0-9a-f]{16}~/),
+    });
     token.offset = 999;
     failure(
       await call({ limit: 1, cursor: Buffer.from(JSON.stringify(token)).toString('base64url') }),
@@ -689,11 +1123,9 @@ describe('additional-duty source contract', () => {
     expect(result.candidates!.some((candidate) => candidate.code === '9903.88.99')).toBe(false);
     expect(notesFetched).toBe(2);
     const evidence = success(await call(result.candidates![0]!.evidenceFollowUp.arguments));
-    expect(
-      evidence
-        .evidence!.filter((item) => item.noteId)
-        .every((item) => item.noteId!.startsWith('edition-B:')),
-    ).toBe(true);
+    const passages = evidence.evidence!.filter((item) => item.noteId);
+    expect(passages).not.toHaveLength(0);
+    expect(passages.every((item) => item.noteId!.startsWith('edition-B:'))).toBe(true);
   });
 
   it('preserves complete schema failures and does not replace them with a success from footnotes', async () => {
@@ -725,14 +1157,21 @@ describe('additional-duty source contract', () => {
     expect(requests).toHaveLength(0);
   });
 
-  it.each([501, 100_000])(
+  it.each([101, 501, 100_000])(
     'empty additional-duty results disclose clamping for limit %i',
     async (limit) => {
-      const result = success(await call({ code: '0101.21.99', limit }));
+      const response = await call({ code: '0101.21.99', limit });
+      const result = success(response);
       expect(result).toMatchObject({
         found: false,
         page: { total: 0, returned: 0, effectiveLimit: 100 },
       });
+      expect(result.guidance).toContain('usitc_get_heading');
+      expect(noticeOf(response)).toBe(clamp(limit));
+      expect(text(response)).toContain(`notice: ${JSON.stringify(noticeOf(response))}`);
+      const atCap = await call({ code: '0101.21.99', limit: 100 });
+      expect(success(atCap).guidance).toBe(result.guidance);
+      expect(noticeOf(atCap)).toBeUndefined();
     },
   );
 
@@ -763,7 +1202,7 @@ describe('additional-duty source contract', () => {
     expect(selected.evidence).toHaveLength(1);
     expect(selected.evidence![0]).toMatchObject({
       matchLevel: 'exact',
-      matchedCode: '0101210010',
+      matchedCode: '0101.21.00.10',
       relation: 'context_only',
     });
   });

@@ -4,7 +4,7 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { readCursor } from '../../../services/tariffs/pagination.js';
+import { pageNotice, readCursor } from '../../../services/tariffs/pagination.js';
 import { TariffService } from '../../../services/tariffs/tariff-service.js';
 import { getUsitcService } from '../../../services/usitc/usitc-service.js';
 import { enrichmentTrailer, formatSourceData } from '../reply.js';
@@ -26,16 +26,11 @@ const referenceItemSchema = z
         kind: z.literal('program').describe('Reviewed program symbol record.'),
         symbol: z.string().describe('Exact SPI, preserving suffix punctuation.'),
         name: z.string().describe('Reviewed program name.'),
-        citation: z.string().describe('Official General Note citation.'),
-        sourceUrl: z.string().describe('Edition-pinned official source.'),
-        sourceEdition: z.string().describe('Verification edition of this decoder.'),
-        conditionality: z.string().describe('Legal qualification conditions.'),
         countryListCoverage: z
           .literal('unknown')
           .describe('Country membership has not been independently verified.'),
-        qualificationNotice: z.string().describe('Program qualification remains unresolved.'),
       })
-      .describe('One edition-pinned program symbol and its qualification limits.'),
+      .describe('One edition-pinned program symbol; the page decoder carries its provenance.'),
     z
       .object({
         kind: z.literal('chapter').describe('Published application navigation label.'),
@@ -57,11 +52,10 @@ const referenceItemSchema = z
         kind: z.literal('unit').describe('Published quantity-unit abbreviation.'),
         symbol: z.string().describe('Exact abbreviation, preserving exponents.'),
         meaning: z.string().describe('Published unit meaning.'),
-        citation: z.string().describe('Official General Note citation.'),
-        sourceUrl: z.string().describe('Edition-pinned official source.'),
-        sourceEdition: z.string().describe('Verification edition.'),
       })
-      .describe('One edition-pinned published quantity unit.'),
+      .describe(
+        'One edition-pinned published quantity unit; the page decoder carries its provenance.',
+      ),
     z
       .object({
         kind: z
@@ -89,6 +83,22 @@ const referenceItemSchema = z
       .describe('One published edition with every available metadata field.'),
   ])
   .describe('One record from the selected reference topic.');
+/** Provenance that applies to every spi or units record, carried once per page. */
+const decoderSchema = z
+  .object({
+    sourceEdition: z.string().describe('Verification edition of this decoder table.'),
+    citation: z.string().describe('Official General Note citation for every record.'),
+    sourceUrl: z.string().describe('Edition-pinned official source.'),
+    conditionality: z
+      .string()
+      .optional()
+      .describe('Legal qualification conditions for every program; spi only.'),
+    qualificationNotice: z
+      .string()
+      .optional()
+      .describe('Program qualification remains unresolved for every symbol; spi only.'),
+  })
+  .describe('Shared provenance and qualification limits for every record on this page.');
 
 /** Decode terms without presenting the bundled SPI table as current country eligibility. */
 export const listReferenceTool = tool('usitc_list_reference', {
@@ -100,13 +110,16 @@ export const listReferenceTool = tool('usitc_list_reference', {
     topic: z
       .enum(['identifiers', 'spi', 'chapters', 'units', 'releases'])
       .describe('Reference table to retrieve.'),
-    ...paginationInputShape,
+    ...paginationInputShape(25),
   }),
   output: z.object({
     ...metadataShape,
     topic: z
       .enum(['identifiers', 'spi', 'chapters', 'units', 'releases'])
       .describe('Requested decoder or metadata topic.'),
+    decoder: decoderSchema
+      .optional()
+      .describe('Present for spi and units: provenance shared by every record on the page.'),
     items: z
       .array(referenceItemSchema)
       .describe('Complete topic-specific records selected for this page.'),
@@ -149,7 +162,8 @@ export const listReferenceTool = tool('usitc_list_reference', {
       ctx,
     );
     ctx.enrich.total(result.page.total);
-    if (notice) ctx.enrich.notice(notice);
+    const message = pageNotice(notice, input.limit);
+    if (message) ctx.enrich.notice(message);
     return result;
   },
   format: formatSourceData,

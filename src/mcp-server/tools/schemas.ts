@@ -3,6 +3,7 @@
  * @module mcp-server/tools/schemas
  */
 import { z } from '@cyanheads/mcp-ts-core';
+import { PAGE_CAP } from '../../services/tariffs/pagination.js';
 
 /** Source metadata shared by all tariff research tools. */
 export const metadataShape = {
@@ -28,35 +29,44 @@ export const metadataShape = {
     .describe('Source provenance.'),
   notices: z.array(z.string()).describe('Persistent source and coverage limitations.'),
 };
-/** Positive safe integer requests process at most 100 complete items per page. */
-export const paginationInputShape = {
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .default(25)
-    .describe(
-      'Requested items as a positive safe integer; effectiveLimit discloses clamping to at most 100, and pages may be byte limited. Keep the same requested limit for continuation.',
-    ),
-  cursor: z
-    .string()
-    .optional()
-    .describe('Opaque nextCursor from the same tool with identical arguments.'),
-};
-/** Explicit complete-collection pagination, including byte-limited pages. */
+/**
+ * Page inputs for one tool: positive safe integer limits with a per-tool default, served as
+ * `min(limit, PAGE_CAP)` whole items per page.
+ */
+export function paginationInputShape(defaultLimit: number) {
+  return {
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .default(defaultLimit)
+      .describe(
+        `Default ${defaultLimit}; a larger value returns at most ${PAGE_CAP} items and says so. Keep the same limit when continuing with a cursor.`,
+      ),
+    cursor: z
+      .string()
+      .optional()
+      .describe('Opaque nextCursor from the same tool with identical arguments.'),
+  };
+}
+/** Explicit complete-collection pagination; only the last page of a collection is short. */
 export const pageSchema = z.object({
   total: z.number().int().describe('Complete locally filtered item count.'),
   returned: z.number().int().describe('Items returned on this page.'),
-  effectiveLimit: z.number().int().describe('Applied item ceiling after clamping to 100.'),
+  effectiveLimit: z
+    .number()
+    .int()
+    .describe(`Requested limit after clamping to ${PAGE_CAP}; every page but the last is full.`),
   nextCursor: z.string().optional().describe('Continuation for every remaining whole item.'),
-  budgetLimited: z
-    .boolean()
-    .optional()
-    .describe('True when the complete reply byte budget reduced this page.'),
 });
 /** Optional result-specific recovery and complete list count, mirrored by the framework. */
 export const listEnrichment = {
-  notice: z.string().optional().describe('Actionable next call for this particular empty result.'),
+  notice: z
+    .string()
+    .optional()
+    .describe(
+      `Actionable next call for this particular empty result, followed by a disclosure when a requested limit above ${PAGE_CAP} was clamped.`,
+    ),
   totalCount: z.number().int().optional().describe('Complete locally filtered item count.'),
 };
 /** Exact executable lookup for an ancestor or rate source. */
@@ -83,9 +93,11 @@ export const publishedRatesSchema = z.object({
     .describe('Published Special cell, without interpretation.'),
   column2: z.string().nullable().optional().describe('Published Column 2 cell mapped from other.'),
 });
-/** Complete normalized source row; non-app unknown fields remain source data. */
-export const tariffRowShape = {
-  nodeId: z.string().describe('Release and source-digest-local node identifier.'),
+/**
+ * Complete published source row without node identity, for rows no node lookup resolves:
+ * flat search matches and section markers. Non-app unknown fields remain source data.
+ */
+export const sourceRowShape = {
   sourceOrdinal: z.number().int().describe('Zero-based position in the complete source export.'),
   htsno: z
     .string()
@@ -125,19 +137,37 @@ export const tariffRowShape = {
     .record(z.string(), z.json())
     .describe('Other non-app source fields, without inferred values.'),
 };
-/** Each rate column resolves independently and retains its exact source lookup. */
+/** Complete normalized source row with the node identity usitc_get_heading resolves. */
+export const tariffRowShape = {
+  nodeId: z
+    .string()
+    .describe(
+      'Exact node identifier for usitc_get_heading, local to this edition and source export.',
+    ),
+  ...sourceRowShape,
+};
+/**
+ * Each rate column resolves independently. A published value's source is its own node; an
+ * inherited value names the exact eight-digit ancestor and its lookup.
+ */
 export const resolvedColumnSchema = z.object({
   state: z
     .enum(['published', 'inherited', 'not_published'])
     .describe(
       'Whether a nonblank value is published here, inherited from the exact eight-digit ancestor, or absent.',
     ),
-  text: z.string().optional().describe('Unevaluated published rate text.'),
-  sourceNodeId: z.string().optional().describe('Node on which this rate was published.'),
-  sourceHtsno: z.string().optional().describe('Number on which this rate was published.'),
+  text: z.string().optional().describe('Unevaluated rate text; absent when not_published.'),
+  sourceNodeId: z
+    .string()
+    .optional()
+    .describe('Inherited only: ancestor node on which this rate was published.'),
+  sourceHtsno: z
+    .string()
+    .optional()
+    .describe('Inherited only: ancestor number on which this rate was published.'),
   sourceFollowUp: nodeFollowUpSchema
     .optional()
-    .describe('Retrieve the complete rate source and its own parent.'),
+    .describe('Inherited only: retrieve the complete rate source and its own parent.'),
 });
 /** General, Special and Column 2 remain independent; country never selects one. */
 export const resolvedRatesSchema = z.object({
@@ -226,7 +256,9 @@ export const countryAssessmentSchema = z.object({
     .object({
       status: z
         .enum(['listed', 'not_listed', 'unknown'])
-        .describe('Membership in the complete reviewed GN3(b) list; unknown on edition mismatch.'),
+        .describe(
+          'Membership in the complete reviewed GN3(b) list; unknown unless editionMatches is true.',
+        ),
       citation: z.string().describe('Official General Note citation for the country list.'),
       sourceEdition: z
         .string()
@@ -247,7 +279,9 @@ export const countryAssessmentSchema = z.object({
   decoderSourceEdition: z.string().describe('Reviewed decoder edition.'),
   editionMatches: z
     .boolean()
-    .describe('Whether the decoder edition equals the checked schedule edition.'),
+    .describe(
+      'Whether the checked schedule edition is the reviewed decoder edition or one whose General Note 3 text was verified identical to it.',
+    ),
   recognizedSymbolCount: z.number().int().describe('Recognized SPI occurrences in parsed clauses.'),
   notice: z.string().describe('Limits of this country comparison.'),
   qualificationNotice: z.string().describe('Program legal requirements remain unresolved.'),

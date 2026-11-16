@@ -11,14 +11,20 @@ export interface NodeFollowUp {
   arguments: { code: string; nodeId: string };
   tool: 'usitc_get_heading';
 }
-/** Published or inherited column value; absence is never interpreted as Free. */
-export interface ResolvedColumn {
-  sourceFollowUp?: NodeFollowUp;
-  sourceHtsno?: string;
-  sourceNodeId?: string;
-  state: 'published' | 'inherited' | 'not_published';
-  text?: string;
-}
+/**
+ * Published or inherited column value; absence is never interpreted as Free. Only an inherited
+ * value names its source row, since a published value's source is the node carrying it.
+ */
+export type ResolvedColumn =
+  | { state: 'published'; text: string }
+  | {
+      state: 'inherited';
+      text: string;
+      sourceNodeId: string;
+      sourceHtsno: string;
+      sourceFollowUp: NodeFollowUp;
+    }
+  | { state: 'not_published' };
 /** All three independent published duty columns. */
 export interface ResolvedRates {
   column2: ResolvedColumn;
@@ -45,10 +51,19 @@ export function isSectionMarker(row: TariffRow, next: TariffRow | undefined): bo
   );
 }
 
-/** Preserve complete source identities and fields for published section metadata. */
-export function headingSections(rows: readonly TariffRow[]): TariffRow[] {
-  return rows.filter((row, index) => isSectionMarker(row, rows[index + 1]));
+/**
+ * Preserve complete source fields and ordinals for published section metadata. Markers sit
+ * outside the node tree, so they carry no nodeId: no node lookup could resolve one.
+ */
+export function headingSections(rows: readonly TariffRow[]): Array<Omit<TariffRow, 'nodeId'>> {
+  return rows
+    .filter((row, index) => isSectionMarker(row, rows[index + 1]))
+    .map(({ nodeId: _nodeId, ...section }) => section);
 }
+
+/** Next call after {@link resolveDutyNode} finds no row, shared by every tool that resolves one. */
+export const DUTY_NODE_MISS_GUIDANCE =
+  'No exact rate line or statistical number matched. Call usitc_get_heading with the containing 4-digit heading to inspect its valid descendants.';
 
 /** Prefer exact rows; an absent eight-digit row resolves only through one published suffix. */
 export function resolveDutyNode(
@@ -124,14 +139,7 @@ export function buildHeadingTree(rows: readonly TariffRow[], heading: string): H
     });
     const resolve = (column: keyof TariffRow['publishedRates']): ResolvedColumn => {
       const own = row.publishedRates[column];
-      if (typeof own === 'string' && own.trim())
-        return {
-          state: 'published',
-          text: own,
-          sourceNodeId: row.nodeId,
-          ...(row.htsno && { sourceHtsno: row.htsno }),
-          sourceFollowUp: followUp(row.nodeId),
-        };
+      if (typeof own === 'string' && own.trim()) return { state: 'published', text: own };
       const inherited = rateAncestor?.publishedRates[column];
       if (rateAncestor?.htsno && typeof inherited === 'string' && inherited.trim())
         return {

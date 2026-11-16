@@ -25,7 +25,6 @@ export interface NotePassage {
   noteLocator: string;
   noteNumber?: string;
   ordinal: number;
-  passageId: string;
   statusMention: boolean;
   subchapter?: string;
   subdivision?: string;
@@ -42,6 +41,10 @@ export interface ExplicitListLink {
   listNoteId: string;
   qualified?: true;
 }
+
+/** The clearance limit every additional-duties reply states, base misses included. */
+export const CLEARANCE_LIMITATION =
+  'No candidate list, empty or not, establishes that no additional duty applies.';
 
 /** Partial coverage facts, rather than an applicability or parser confidence claim. */
 export interface Chapter99Coverage {
@@ -72,7 +75,6 @@ export interface Chapter99Evidence {
   matchLevel: 'exact' | 'rate_line' | 'statistical_subset';
   noteId: string;
   noteLocator: string;
-  passageId: string;
   relation: 'inclusion_candidate' | 'exclusion_or_exception' | 'context_only';
   role: 'product_list' | 'governing' | 'qualification' | 'mention';
   sourceCode?: string;
@@ -83,7 +85,6 @@ export interface Chapter99Evidence {
 export interface NoteFragment {
   fragmentCount: number;
   fragmentIndex: number;
-  passageId: string;
   text: string;
 }
 
@@ -213,7 +214,6 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
     passages.push({
       ...location,
       noteId,
-      passageId: noteId,
       ordinal,
       text,
       locatorStatus: recognized ? 'recognized' : 'ambiguous',
@@ -496,6 +496,7 @@ export function buildChapter99Index(html: string, source: Chapter99Source): Chap
         'Product-independent provisions, ranges, external annexes, derivative/content tests and legal applicability are not determined.',
         'Country scope recognizes only reviewed single positive product(s)-of-China or Canada clauses; other or qualified wording remains unknown.',
         'Published status words do not establish current enforceability.',
+        CLEARANCE_LIMITATION,
       ],
     },
   };
@@ -550,7 +551,6 @@ export function findChapter99Evidence(
           relation: notice ? 'context_only' : relation,
           role,
           noteId: target.noteId,
-          passageId: target.passageId,
           noteLocator: target.noteLocator,
           ...(sourceCode && { sourceCode }),
           matchedCode,
@@ -640,7 +640,6 @@ export function getChapter99Fragments(index: Chapter99Index, noteId: string): No
   }
   if (fragment) texts.push(fragment);
   return texts.map((text, fragmentIndex) => ({
-    passageId: passage.passageId,
     fragmentIndex,
     fragmentCount: texts.length,
     text,

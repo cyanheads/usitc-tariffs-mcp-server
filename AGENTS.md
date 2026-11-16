@@ -2,8 +2,8 @@
 
 **Server:** @cyanheads/usitc-tariffs-mcp-server
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -44,11 +44,11 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ## Domain contracts
 
-Six read-only tools are registered in `src/index.ts`; no resources or prompts. See `docs/design.md` for domain decisions and `README.md` for caller contracts.
+Six read-only tools are registered in `src/index.ts`, and the published `skills/` tree is served as `skill://` resources; the server defines no resources or prompts of its own. See `docs/design.md` for domain decisions and `README.md` for caller contracts.
 
 - `usitc_search_hts` returns flat matches, not resolved ancestry or rates.
 - `usitc_get_heading` reconstructs the complete containing heading before selecting nodes. Unnumbered parents participate in ancestry; verified subchapter titles remain separate source metadata.
-- `usitc_lookup_duty_rate` retains all base columns; blank statistical cells inherit only from their matching eight-digit legal ancestor. An absent eight-digit row resolves only through a unique published ten-digit row, preserving source identity. GN3(b) country listing is edition-pinned and never selects a rate.
+- `usitc_lookup_duty_rate` retains all base columns; blank statistical cells inherit only from their matching eight-digit legal ancestor. An absent eight-digit row resolves only through a unique published ten-digit row, preserving source identity. GN3(b) country listing comes from the reviewed edition and applies only to it and to editions in `verifiedEditions` (checked with `scripts/verify-general-note-3.ts`); it never relabels provenance or selects a rate.
 - `usitc_check_additional_duties` is permanently partial research. Keep unknown and different-country evidence visible; empty results never establish clearance.
 - `usitc_list_reference` decodes edition-pinned symbols without asserting country membership or qualification.
 - `usitc_browse_chapter` counts complete published subtrees before pagination.
@@ -57,7 +57,7 @@ No server-specific environment variables or upstream credentials are required. T
 
 ## Patterns
 
-The search definition in `src/mcp-server/tools/definitions/search-hts.tool.ts` demonstrates the common path: normalize input, bind a cursor to normalized arguments, call `TariffService` with `ctx`, enrich the result count, and format the returned data with `formatSourceData`. Error contracts stay inline on each definition; shared response schemas live in `src/mcp-server/tools/schemas.ts`.
+The search definition in `src/mcp-server/tools/definitions/search-hts.tool.ts` demonstrates the common path: normalize input, bind a cursor to normalized arguments, call `TariffService` with `ctx`, enrich the result count and page notice (`pageNotice` appends the clamp disclosure), and format the returned data with `formatSourceData`. Error contracts stay inline on each definition; shared response schemas live in `src/mcp-server/tools/schemas.ts`.
 
 ## Context
 
@@ -124,6 +124,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 | `src/services/tariffs/` | Hierarchy, base rates and pagination |
 | `src/services/reference/` | Identifier normalization and reference tables |
 | `src/services/chapter99/` | Partial evidence grammar and complete passage retrieval |
+| `skills/` | Published agent skill (`usitc-tariffs-guide`), served over MCP |
 | `tests/` | Tests mirroring source modules |
 
 See `docs/tree.md` for the generated tree.
@@ -143,7 +144,7 @@ See `docs/tree.md` for the generated tree.
 
 ## Skills
 
-Development skills live in `framework-skills/`; read them when a task matches, or run `bun run list-skills` for the registry. Root `skills/` is a separate, opt-in tree for agents that install and use the server. Author it with `add-skill` only when a reusable tool chain earns its place; maintenance never creates it. Published skills reach plugin installs, npm, Docker, and MCPB; serving them over MCP additionally requires `createApp({ skills: 'skills' })`. This server does not publish or serve skills.
+Development skills live in `framework-skills/`; read them when a task matches, or run `bun run list-skills` for the registry. Root `skills/` is a separate, opt-in tree for agents that install and use the server. Author it with `add-skill` only when a reusable tool chain earns its place; maintenance never creates it. Published skills reach plugin installs, npm, Docker, and MCPB; serving them over MCP additionally requires `createApp({ skills: 'skills' })`. This server publishes `skills/usitc-tariffs-guide/` and serves it over MCP that way.
 
 **Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 

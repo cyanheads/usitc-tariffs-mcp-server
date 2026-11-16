@@ -3,30 +3,16 @@
  * @module tests/services/usitc/usitc-service.test
  */
 
+import { createHash } from 'node:crypto';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UsitcDependencies } from '@/services/usitc/usitc-service.js';
+import { drive, json } from '../../fixtures/tool-harness.js';
 
 const row = { htsno: '8507.60.00', indent: '0', description: 'Lithium-ion batteries' };
-const json = (value: unknown) =>
-  new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
-
-async function drive<T>(promise: Promise<T>): Promise<T> {
-  let settled = false;
-  const observed = promise
-    .then(
-      (value) => ({ value }),
-      (error: unknown) => ({ error }),
-    )
-    .finally(() => {
-      settled = true;
-    });
-  for (let index = 0; index < 50 && !settled; index++) await vi.advanceTimersByTimeAsync(1000);
-  const result = await observed;
-  if ('error' in result) throw result.error;
-  return result.value;
-}
+const endpoints = (requests: Array<{ url: URL }>) =>
+  requests.map(({ url }) => url.pathname.split('/').at(-1));
 
 async function setup(handler?: NonNullable<UsitcDependencies['fetch']>) {
   const { UsitcService } = await import('@/services/usitc/usitc-service.js');
@@ -78,19 +64,15 @@ describe('USITC source boundary', () => {
     expect(maximum).toBe(1);
   });
 
-  it.each(['search', 'heading', 'chapter'] as const)(
+  it.each(['heading', 'chapter'] as const)(
     'rejects invalid %s input with its stable reason',
     async (kind) => {
       const { service, ctx } = await setup();
       const operation =
-        kind === 'search'
-          ? service.search('  ', ctx)
-          : kind === 'heading'
-            ? service.getHeading('8507.60', ctx)
-            : service.getChapter('00', ctx);
+        kind === 'heading' ? service.getHeading('8507.60', ctx) : service.getChapter('00', ctx);
       await expect(drive(operation)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: { reason: kind === 'search' ? 'invalid_query' : 'invalid_code' },
+        data: { reason: 'invalid_code' },
       });
     },
   );
@@ -164,6 +146,33 @@ describe('USITC source boundary', () => {
     );
     expect((await drive(service.search('no matches', ctx))).data.rows).toEqual([]);
     expect((await drive(service.getHeading('7701', ctx))).data.rows).toEqual([]);
+  });
+
+  it('mints node IDs from 12 hex of the export body digest and 16-hex snapshot IDs', async () => {
+    let body: unknown[] = [row, { indent: '1', description: 'Unnamed', superior: 'true' }];
+    const { service, ctx } = await setup(async (url) => {
+      if (url.pathname.endsWith('currentRelease')) return json({ name: 'edition-A' });
+      if (url.pathname.endsWith('releaseList')) return json([{ name: 'edition-A' }]);
+      return json(body);
+    });
+    const bodyDigest = (value: unknown) =>
+      createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 12);
+    const first = await drive(service.getHeading('8507', ctx));
+    expect(first.data.rows.map((entry) => entry.nodeId)).toEqual([
+      `edition-A:${bodyDigest(body)}:0`,
+      `edition-A:${bodyDigest(body)}:1`,
+    ]);
+    expect(first.data.snapshotId).toMatch(/^[0-9a-f]{16}$/);
+    expect(JSON.stringify(first.data.rows)).not.toMatch(/[0-9a-f]{64}/);
+    expect((await drive(service.getRowsSnapshot(first.data.snapshotId, ctx))).rows).toEqual(
+      first.data.rows,
+    );
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
+    body = [{ ...row, description: 'Corrected within the same edition' }];
+    const second = await drive(service.getHeading('8507', ctx));
+    expect(second.data.rows[0]!.nodeId).toBe(`edition-A:${bodyDigest(body)}:0`);
+    expect(second.data.rows[0]!.nodeId).not.toBe(first.data.rows[0]!.nodeId);
+    expect(second.data.snapshotId).not.toBe(first.data.snapshotId);
   });
 
   it.each(['{', '{}', '[{"indent":"bad","description":"x"}]'])(
@@ -330,7 +339,206 @@ describe('edition and snapshot lifecycle', () => {
     await drive(service.search('batteries', ctx));
     expect(requests.filter(({ url }) => url.pathname.endsWith('currentRelease'))).toHaveLength(2);
     await drive(service.search('batteries', ctx));
-    expect(requests).toHaveLength(5);
+    expect(requests).toHaveLength(4);
+  });
+
+  it('sends currentRelease, releaseList, search, currentRelease on a cold first search', async () => {
+    const { service, requests, ctx } = await setup();
+    await drive(service.search('batteries', ctx));
+    expect(endpoints(requests)).toEqual([
+      'currentRelease',
+      'releaseList',
+      'search',
+      'currentRelease',
+    ]);
+  });
+
+  it('reads releaseList only for an unseen name inside and after the metadata window', async () => {
+    const { service, requests, ctx } = await setup();
+    await drive(service.search('batteries', ctx));
+    requests.length = 0;
+    await drive(service.getHeading('8507', ctx));
+    expect(endpoints(requests)).toEqual(['exportList', 'currentRelease']);
+    requests.length = 0;
+    await drive(service.search('batteries', ctx));
+    expect(requests).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drive(service.getChapter('85', ctx));
+    expect(endpoints(requests)).toEqual(['currentRelease', 'exportList', 'currentRelease']);
+  });
+
+  it('serves the release list inside the window with one currentRelease check', async () => {
+    const list = [
+      { name: 'edition-A', status: 'current', releaseStartDate: '10/30/2026' },
+      { name: 'edition-old', status: 'archive', title: 'Old publication' },
+    ];
+    const { service, requests, ctx } = await setup(async (url) =>
+      url.pathname.endsWith('currentRelease') ? json({ name: 'edition-A' }) : json(list),
+    );
+    await drive(service.getCurrentRelease(ctx));
+    requests.length = 0;
+    const result = await drive(service.getReleases(ctx));
+    expect(endpoints(requests)).toEqual(['releaseList', 'currentRelease']);
+    expect(result.data).toEqual(list);
+    expect(result.release).toMatchObject({ status: 'current', effectiveDate: '10/30/2026' });
+  });
+
+  it('keeps release fields for an unchanged name while checkedAt advances', async () => {
+    const { service, requests, ctx } = await setup(async (url) => {
+      if (url.pathname.endsWith('currentRelease'))
+        return json({ name: 'edition-A', description: 'From currentRelease' });
+      return json([
+        { name: 'edition-old', status: 'archive', releaseStartDate: '01/01/2025' },
+        {
+          name: 'edition-A',
+          description: 'From releaseList',
+          status: 'current',
+          releaseStartDate: '10/09/2026',
+        },
+      ]);
+    });
+    const first = await drive(service.getCurrentRelease(ctx));
+    await vi.advanceTimersByTimeAsync(60_000);
+    const second = await drive(service.getCurrentRelease(ctx));
+    for (const { release } of [first, second])
+      expect(release).toEqual({
+        name: 'edition-A',
+        description: 'From currentRelease',
+        effectiveDate: '10/09/2026',
+        status: 'current',
+        checkedAt: expect.any(String),
+      });
+    expect(Date.parse(second.release.checkedAt)).toBeGreaterThan(
+      Date.parse(first.release.checkedAt),
+    );
+    expect(endpoints(requests)).toEqual(['currentRelease', 'releaseList', 'currentRelease']);
+  });
+
+  it.each([
+    ['HTTP 503', () => new Response('', { status: 503 })],
+    ['a non-JSON body', () => new Response('not json')],
+  ])('answers an unchanged name while releaseList fails with %s', async (_failure, failing) => {
+    let listFails = false;
+    const { service, requests, ctx } = await setup(async (url) => {
+      if (url.pathname.endsWith('currentRelease')) return json({ name: 'edition-A' });
+      if (url.pathname.endsWith('releaseList'))
+        return listFails
+          ? failing()
+          : json([{ name: 'edition-A', status: 'current', releaseStartDate: '10/09/2026' }]);
+      return json([row]);
+    });
+    await drive(service.search('batteries', ctx));
+    listFails = true;
+    requests.length = 0;
+    const inside = await drive(service.getHeading('8507', ctx));
+    await vi.advanceTimersByTimeAsync(60_000);
+    const after = await drive(service.getCurrentRelease(ctx));
+    for (const { release } of [inside, after])
+      expect(release).toMatchObject({
+        name: 'edition-A',
+        status: 'current',
+        effectiveDate: '10/09/2026',
+      });
+    expect(endpoints(requests)).toEqual(['exportList', 'currentRelease', 'currentRelease']);
+  });
+
+  it('keeps nothing for a name missing from releaseList and reads it on the next check', async () => {
+    let listed = false;
+    const { service, requests, ctx } = await setup(async (url) => {
+      if (url.pathname.endsWith('currentRelease')) return json({ name: 'edition-A' });
+      return json(
+        listed
+          ? [{ name: 'edition-A', status: 'current', releaseStartDate: '10/09/2026' }]
+          : [{ name: 'edition-old', status: 'archive', releaseStartDate: '01/01/2025' }],
+      );
+    });
+    const sparse = await drive(service.getCurrentRelease(ctx));
+    expect(sparse.release).toEqual({ name: 'edition-A', checkedAt: expect.any(String) });
+    listed = true;
+    await vi.advanceTimersByTimeAsync(60_000);
+    const complete = await drive(service.getCurrentRelease(ctx));
+    expect(complete.release).toMatchObject({ effectiveDate: '10/09/2026', status: 'current' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drive(service.getCurrentRelease(ctx));
+    expect(endpoints(requests)).toEqual([
+      'currentRelease',
+      'releaseList',
+      'currentRelease',
+      'releaseList',
+      'currentRelease',
+    ]);
+  });
+
+  it('reads releaseList for a new name, purges snapshots and rebuilds once', async () => {
+    let release = 'edition-A';
+    const { service, requests, ctx } = await setup(async (url) => {
+      if (url.pathname.endsWith('currentRelease')) return json({ name: release });
+      if (url.pathname.endsWith('releaseList'))
+        return json([
+          { name: 'edition-A', status: 'archive', releaseStartDate: '10/09/2026' },
+          { name: 'edition-B', status: 'current', releaseStartDate: '10/30/2026' },
+        ]);
+      if (url.searchParams.get('keyword') === 'new-component') release = 'edition-B';
+      return json([row]);
+    });
+    const original = await drive(service.search('old-component', ctx));
+    requests.length = 0;
+    const result = await drive(service.search('new-component', ctx));
+    expect(endpoints(requests)).toEqual([
+      'search',
+      'currentRelease',
+      'releaseList',
+      'search',
+      'currentRelease',
+    ]);
+    expect(result.release).toMatchObject({
+      name: 'edition-B',
+      status: 'current',
+      effectiveDate: '10/30/2026',
+    });
+    expect(result.data.rows[0]!.nodeId.startsWith('edition-B:')).toBe(true);
+    await expect(
+      drive(service.getRowsSnapshot(original.data.snapshotId, ctx)),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Conflict,
+      data: { reason: 'cursor_expired' },
+    });
+  });
+
+  it('fails a check whose releaseList read fails for a new name and never reuses the old record', async () => {
+    let release = 'edition-A';
+    let listFails = false;
+    const { service, requests, ctx } = await setup(async (url) => {
+      if (url.pathname.endsWith('currentRelease')) return json({ name: release });
+      if (listFails) return new Response('{"status":400}', { status: 400 });
+      return json([
+        {
+          name: 'edition-A',
+          description: 'Edition A',
+          status: 'current',
+          releaseStartDate: '10/09/2026',
+        },
+      ]);
+    });
+    await drive(service.getCurrentRelease(ctx));
+    release = 'edition-B';
+    listFails = true;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(drive(service.getCurrentRelease(ctx))).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      data: { endpoint: 'releaseList' },
+    });
+    listFails = false;
+    const next = await drive(service.getCurrentRelease(ctx));
+    expect(next.release).toEqual({ name: 'edition-B', checkedAt: expect.any(String) });
+    expect(endpoints(requests)).toEqual([
+      'currentRelease',
+      'releaseList',
+      'currentRelease',
+      'releaseList',
+      'currentRelease',
+      'releaseList',
+    ]);
   });
 
   it('discards the first assembly on an edition transition', async () => {

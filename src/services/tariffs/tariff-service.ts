@@ -14,29 +14,54 @@ import {
   parseSpecialCell,
 } from '../reference/reference-service.js';
 import type { EditionResult, ReleaseRecord, RowsSnapshot } from '../usitc/types.js';
-import type { UsitcService } from '../usitc/usitc-service.js';
+import { nodeIdRelease, type UsitcService } from '../usitc/usitc-service.js';
 import {
   buildHeadingTree,
+  DUTY_NODE_MISS_GUIDANCE,
   headingSections,
   resolveDutyNode,
   selectHeadingNodes,
   summarizeChapter,
 } from './heading-tree.js';
-import { digestValue, type PageCursor, packPage, validateCursor } from './pagination.js';
+import {
+  digestValue,
+  type PageCursor,
+  packPage,
+  shortDigest,
+  validateCursor,
+} from './pagination.js';
 
 /** Published decoder topics, without unsupported historical schedule selection. */
 export type ReferenceTopic = 'identifiers' | 'spi' | 'chapters' | 'units' | 'releases';
 type StaticReference =
   | ReturnType<typeof listIdentifierReferences>[number]
-  | ReturnType<typeof listProgramReferences>[number]
+  | ReturnType<typeof listProgramReferences>['items'][number]
   | ReturnType<typeof listChapterReferences>[number]
-  | ReturnType<typeof listQuantityUnits>[number];
+  | ReturnType<typeof listQuantityUnits>['items'][number];
+/** Provenance shared by every record of a decoder table, stated once per page. */
+type ReferenceDecoder =
+  | ReturnType<typeof listProgramReferences>['decoder']
+  | ReturnType<typeof listQuantityUnits>['decoder'];
 type ReleaseSnapshot = EditionResult<ReleaseRecord[]> & {
   digest: string;
   snapshotId: string;
   expiresAt: number;
 };
 let releases: ReleaseSnapshot | undefined;
+
+/**
+ * Zero-hit search guidance. A prefix in chapter 00 gets no browse pointer, since
+ * usitc_browse_chapter takes only chapters 01–99.
+ */
+function emptySearchNotice(codePrefix: string | undefined): string {
+  if (!codePrefix) {
+    return 'No published matches were found. Broaden query or call usitc_browse_chapter for the relevant chapter; call usitc_list_reference with topic identifiers for code formats.';
+  }
+  const chapter = codePrefix.slice(0, 2);
+  return chapter === '00'
+    ? `No published matches were found under code prefix ${codePrefix}. Broaden query or remove codePrefix.`
+    : `No published matches were found under code prefix ${codePrefix}. Broaden query, remove codePrefix, or call usitc_browse_chapter for chapter ${chapter}.`;
+}
 
 /** Research operations reuse the source boundary's bounded schedule snapshot store. */
 export class TariffService {
@@ -69,31 +94,41 @@ export class TariffService {
     return { ...result.data, release: result.release, notices: result.notices };
   }
 
-  /** Flat matches preserve upstream order and never claim resolved blank rates. */
-  async search(query: string, limit: number, cursor: PageCursor | undefined, ctx: Context) {
+  /**
+   * Flat matches preserve upstream order and never claim resolved blank rates. A canonical
+   * `codePrefix` keeps rows whose published number starts with its digits, filtering the complete
+   * cached match set before paging; unnumbered rows drop out. Rows carry no `nodeId`: no node
+   * lookup resolves a search-body ID.
+   */
+  async search(
+    query: string,
+    codePrefix: string | undefined,
+    limit: number,
+    cursor: PageCursor | undefined,
+    ctx: Context,
+  ) {
     const snapshot = await this.rows('search', query, cursor, ctx);
-    const rows = snapshot.rows.map((row) => ({ ...row, ratesResolved: false as const }));
-    const notice =
-      rows.length === 0
-        ? 'No published matches were found. Broaden query or call usitc_browse_chapter for the relevant chapter; call usitc_list_reference with topic identifiers for code formats.'
-        : undefined;
+    const prefixDigits = codePrefix?.replaceAll('.', '');
+    const rows = snapshot.rows
+      .filter((row) => !prefixDigits || row.htsno?.replaceAll('.', '').startsWith(prefixDigits))
+      .map(({ nodeId: _nodeId, ...row }) => ({ ...row, ratesResolved: false as const }));
     return {
-      notice,
+      notice: rows.length > 0 ? undefined : emptySearchNotice(codePrefix),
       result: packPage({
         tool: 'usitc_search_hts',
-        args: { query, limit },
+        args: { query, ...(codePrefix && { codePrefix }), limit },
         edition: snapshot.release.name,
         digest: snapshot.digest,
         snapshotId: snapshot.snapshotId,
         items: rows,
         limit,
         cursor,
-        notice,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,
           notices: snapshot.notices,
           query,
+          ...(codePrefix && { codePrefix }),
           context: 'flat_search_matches' as const,
           rows: selected,
           page,
@@ -110,7 +145,7 @@ export class TariffService {
     cursor: PageCursor | undefined,
     ctx: Context,
   ) {
-    const normalized = normalizeCode(code, [4, 6, 8]);
+    const normalized = normalizeCode(code);
     const snapshot = await this.rows('heading', normalized.heading, cursor, ctx);
     const all = buildHeadingTree(snapshot.rows, normalized.heading);
     const scope = selectHeadingNodes(all, normalized.digits);
@@ -118,10 +153,11 @@ export class TariffService {
     if (nodeId) {
       const node = scope.find((item) => item.nodeId === nodeId);
       if (!node) {
-        if (!nodeId.startsWith(`${snapshot.release.name}:`))
+        const release = nodeIdRelease(nodeId);
+        if (release !== undefined && release !== snapshot.release.name)
           throw conflict('The node belongs to an expired edition.', { reason: 'cursor_expired' });
         throw validationError(
-          'nodeId is not in the requested heading or classification subtree. Repeat without nodeId to obtain current identifiers.',
+          'nodeId does not identify a node of this classification in the current source export. Repeat without nodeId to obtain current identifiers.',
           { reason: 'invalid_cursor' },
         );
       }
@@ -132,7 +168,7 @@ export class TariffService {
         ? 'No classification matched this code in this edition. Call usitc_browse_chapter for its chapter, or usitc_search_hts with a broader code prefix.'
         : undefined;
     return {
-      notice: guidance,
+      notice: undefined,
       result: packPage({
         tool: 'usitc_get_heading',
         args: { code: normalized.code, ...(nodeId && { nodeId }), limit },
@@ -142,7 +178,6 @@ export class TariffService {
         items: nodes,
         limit,
         cursor,
-        notice: guidance,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,
@@ -185,7 +220,6 @@ export class TariffService {
         items: headings,
         limit,
         cursor,
-        notice,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,
@@ -204,20 +238,19 @@ export class TariffService {
     const snapshot = await this.rows('heading', normalized.heading, undefined, ctx);
     const nodes = buildHeadingTree(snapshot.rows, normalized.heading);
     const row = resolveDutyNode(nodes, normalized.digits);
+    const special = row?.resolvedRates.special;
     const specialPrograms =
-      row?.resolvedRates.special.text === undefined
-        ? undefined
-        : parseSpecialCell(row.resolvedRates.special.text, countryCode);
-    const guidance = row
-      ? undefined
-      : 'No exact rate line or statistical number matched. Call usitc_get_heading with the containing 4-digit heading to inspect its valid descendants.';
+      special && special.state !== 'not_published'
+        ? parseSpecialCell(special.text, countryCode)
+        : undefined;
+    const guidance = row ? undefined : DUTY_NODE_MISS_GUIDANCE;
     return {
       release: snapshot.release,
       source: snapshot.source,
       notices: snapshot.notices,
       code: normalized.code,
       found: row !== undefined,
-      ...(row && { row, resolvedRates: row.resolvedRates }),
+      ...(row && { row }),
       ...(specialPrograms && { specialPrograms }),
       countryAssessment: assessCountry(
         specialPrograms ?? { clauses: [] },
@@ -244,21 +277,22 @@ export class TariffService {
   ) {
     if (topic === 'releases') return this.releaseReference(limit, cursor, ctx);
     const metadata = await this.source.getCurrentRelease(ctx);
-    const items: readonly StaticReference[] =
+    const table: { decoder?: ReferenceDecoder; items: readonly StaticReference[] } =
       topic === 'identifiers'
-        ? listIdentifierReferences()
+        ? { items: listIdentifierReferences() }
         : topic === 'spi'
           ? listProgramReferences()
           : topic === 'chapters'
-            ? listChapterReferences()
+            ? { items: listChapterReferences() }
             : listQuantityUnits();
-    const digest = digestValue(items);
+    const { decoder, items } = table;
+    const digest = digestValue(table);
     const result = packPage({
       tool: 'usitc_list_reference',
       args: { topic, limit },
       edition: metadata.release.name,
       digest,
-      snapshotId: `reference:${topic}:${digest}`,
+      snapshotId: `reference:${topic}:${shortDigest(digest)}`,
       items,
       limit,
       cursor,
@@ -267,6 +301,7 @@ export class TariffService {
         source: metadata.source,
         notices: metadata.notices,
         topic,
+        ...(decoder && { decoder }),
         items: selected,
         page,
       }),
@@ -297,7 +332,7 @@ export class TariffService {
       snapshot = {
         ...metadata,
         digest,
-        snapshotId: `releases:${digest}`,
+        snapshotId: `releases:${shortDigest(digest)}`,
         expiresAt: Date.now() + 15 * 60_000,
       };
       releases = snapshot;
@@ -323,7 +358,6 @@ export class TariffService {
         limit,
         cursor,
         expiresAt: snapshot.expiresAt,
-        notice,
         build: (selected, page) => ({
           release: snapshot.release,
           source: snapshot.source,

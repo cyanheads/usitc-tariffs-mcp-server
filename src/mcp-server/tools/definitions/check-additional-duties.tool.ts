@@ -5,6 +5,12 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getAdditionalDutiesService } from '../../../services/chapter99/additional-duties-service.js';
+import {
+  CANDIDATE_CODE_INPUT,
+  CODE_INPUT,
+  COUNTRY_INPUT,
+} from '../../../services/reference/reference-service.js';
+import { pageNotice } from '../../../services/tariffs/pagination.js';
 import { getUsitcService } from '../../../services/usitc/usitc-service.js';
 import { additionalDutiesOutputSchema } from '../additional-duties-schemas.js';
 import { enrichmentTrailer, formatSourceData } from '../reply.js';
@@ -19,11 +25,13 @@ export const checkAdditionalDutiesTool = tool('usitc_check_additional_duties', {
   input: z.object({
     code: z
       .string()
+      .regex(CODE_INPUT.pattern, CODE_INPUT.message)
       .describe(
         'Exact eight- or ten-digit base commodity number, bare or conventionally dotted; Chapter 99 input is invalid.',
       ),
     countryCode: z
       .string()
+      .regex(COUNTRY_INPUT.pattern, COUNTRY_INPUT.message)
       .optional()
       .describe('Assigned ISO alpha-2 country; comparison only, never sent upstream.'),
     view: z
@@ -32,9 +40,10 @@ export const checkAdditionalDutiesTool = tool('usitc_check_additional_duties', {
       .describe('One result collection; evidence requires candidateCode.'),
     candidateCode: z
       .string()
+      .regex(CANDIDATE_CODE_INPUT.pattern, CANDIDATE_CODE_INPUT.message)
       .optional()
       .describe('Returned Chapter 99 candidate number, only with view evidence.'),
-    ...paginationInputShape,
+    ...paginationInputShape(10),
     noteId: z
       .string()
       .optional()
@@ -44,7 +53,9 @@ export const checkAdditionalDutiesTool = tool('usitc_check_additional_duties', {
     noteCursor: z
       .string()
       .optional()
-      .describe('Returned nextNoteCursor; requires the same noteId and original selectors.'),
+      .describe(
+        'page.nextCursor returned by a noteId page; requires the same noteId and original selectors.',
+      ),
   }),
   output: additionalDutiesOutputSchema,
   enrichment: listEnrichment,
@@ -53,7 +64,7 @@ export const checkAdditionalDutiesTool = tool('usitc_check_additional_duties', {
     {
       reason: 'invalid_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Identifier is not an exact eight- or ten-digit base commodity number.',
+      when: 'code is not eight or ten digits or names a Chapter 99 number, or candidateCode is not eight digits.',
       recovery:
         'Call usitc_list_reference with topic identifiers, then retry with a supported tariff code.',
       thrownBy: 'service',
@@ -128,7 +139,8 @@ export const checkAdditionalDutiesTool = tool('usitc_check_additional_duties', {
       ctx,
     );
     ctx.enrich.total(result.page.total);
-    if (notice) ctx.enrich.notice(notice);
+    const message = pageNotice(notice, input.limit);
+    if (message) ctx.enrich.notice(message);
     return result;
   },
   format: formatSourceData,

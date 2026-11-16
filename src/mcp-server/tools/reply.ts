@@ -1,10 +1,10 @@
 /**
- * @fileoverview Lossless source-data rendering and complete MCP reply measurement.
+ * @fileoverview Lossless source-data rendering and the enrichment trailer.
  * @module mcp-server/tools/reply
  */
-/** Quote source strings as JSON; a longer fence cannot be closed by source backticks. */
+/** Quote source strings as single-line JSON; a longer fence cannot be closed by source backticks. */
 export function formatSourceData(result: unknown): Array<{ type: 'text'; text: string }> {
-  const json = JSON.stringify(result, null, 2);
+  const json = JSON.stringify(result);
   let longest = 2;
   for (const match of json.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
   const fence = '`'.repeat(longest + 1);
@@ -37,34 +37,8 @@ export function formatSourceData(result: unknown): Array<{ type: 'text'; text: s
   ];
 }
 
-/** Exact enrichment trailer used by the definitions and by the page packer. */
+/** Exact enrichment trailer rendered after the source data by every definition. */
 export const enrichmentTrailer = {
   totalCount: { render: (value: number) => `totalCount: ${value}` },
   notice: { render: (value: string) => `notice: ${JSON.stringify(value)}` },
 };
-
-/** Measure both surfaces, enrichment and a conservative JSON-RPC transport envelope. */
-export function replySizeInBytes(
-  result: unknown,
-  enrichment: { totalCount?: number; notice?: string } = {},
-): number {
-  const content = formatSourceData(result);
-  const trailer = [
-    enrichment.totalCount !== undefined &&
-      enrichmentTrailer.totalCount.render(enrichment.totalCount),
-    enrichment.notice !== undefined && enrichmentTrailer.notice.render(enrichment.notice),
-  ]
-    .filter(Boolean)
-    .join('\n');
-  if (trailer) content.push({ type: 'text', text: `\n\n${trailer}` });
-  return new TextEncoder().encode(
-    JSON.stringify({
-      jsonrpc: '2.0',
-      id: 'x'.repeat(256),
-      result: {
-        content,
-        structuredContent: { ...(result as Record<string, unknown>), ...enrichment },
-      },
-    }),
-  ).byteLength;
-}

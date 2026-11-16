@@ -60,7 +60,14 @@ type Operation = {
   ctx: Context;
 };
 type Body = { bytes: Uint8Array; contentType: string | null; source: Source; digest: string };
-type Metadata = { release: Release; source: Source; fetchedAt: number; sequence: number };
+/** `listRecord` is the releaseList record for `release.name`; undefined when the list lacked it. */
+type Metadata = {
+  release: Release;
+  listRecord: ReleaseRecord | undefined;
+  source: Source;
+  fetchedAt: number;
+  sequence: number;
+};
 type CacheEntry = { snapshot: RowsSnapshot; expiresAt: number; requestKey: string };
 
 /** Injectable I/O and wall clock; tests can combine this with fake timers. */
@@ -174,6 +181,23 @@ const mappedRowKeys = new Set([
 ]);
 const appRowKeys = new Set(['hasHighlight', 'highlightHtsNo', 'highlightStatSuffix', 'selector']);
 
+/** Node IDs carry the first 48 bits of the export body digest: `<release>:<12 hex>:<ordinal>`. */
+const NODE_DIGEST_HEX = 12;
+
+/**
+ * Release a node ID was minted under, or undefined for any string this format never produced
+ * (including the earlier full-digest form). Linear in the input; the release may contain colons.
+ */
+export function nodeIdRelease(nodeId: string): string | undefined {
+  const ordinalAt = nodeId.lastIndexOf(':');
+  const digestAt = nodeId.lastIndexOf(':', ordinalAt - 1);
+  if (ordinalAt < 0 || digestAt <= 0) return undefined;
+  const digest = nodeId.slice(digestAt + 1, ordinalAt);
+  if (digest.length !== NODE_DIGEST_HEX || !/^[0-9a-f]+$/.test(digest)) return undefined;
+  if (!/^(?:0|[1-9]\d*)$/.test(nodeId.slice(ordinalAt + 1))) return undefined;
+  return nodeId.slice(0, digestAt);
+}
+
 function normalizeRow(
   row: TariffRecord,
   ordinal: number,
@@ -186,7 +210,7 @@ function normalizeRow(
       sourceFields[key] = value;
   }
   return {
-    nodeId: `${release}:${digest}:${ordinal}`,
+    nodeId: `${release}:${digest.slice(0, NODE_DIGEST_HEX)}:${ordinal}`,
     sourceOrdinal: ordinal,
     ...(row.htsno && { htsno: row.htsno }),
     indent: Number(row.indent),
@@ -278,11 +302,7 @@ export class UsitcService {
             components.push(snapshot);
             return Promise.resolve(snapshot);
           },
-          search: (query) => {
-            if (!query.trim())
-              throw validationError('Search requires nonblank text.', { reason: 'invalid_query' });
-            return rows({ endpoint: 'search', keyword: query.trim() });
-          },
+          search: (query) => rows({ endpoint: 'search', keyword: query.trim() }),
           getHeading: (heading) => {
             if (!/^\d{4}$/.test(heading))
               throw validationError('Heading must contain four digits.', {
@@ -366,7 +386,7 @@ export class UsitcService {
               'USITC supplied conflicting additionalDuties and addiitionalDuties values; neither value was overwritten.',
             );
           const snapshot: RowsSnapshot = {
-            snapshotId: hash(`${metadata.release.name}:${key}:${body.digest}`),
+            snapshotId: hash(`${metadata.release.name}:${key}:${body.digest}`).slice(0, 16),
             digest: body.digest,
             release: metadata.release,
             source: body.source,
@@ -467,16 +487,22 @@ export class UsitcService {
     const sequence = ++this.metadataSequence;
     const body = await this.request({ endpoint: 'currentRelease' }, op);
     const current = this.json(body, releaseRecordSchema);
-    const records = this.json(
-      await this.request({ endpoint: 'releaseList' }, op),
-      z.array(releaseRecordSchema),
-    );
+    /**
+     * A listed status or effective date changes only when another name supersedes the release,
+     * so the kept record serves until currentRelease names another edition. A name the list
+     * lacked keeps nothing and is read again at the next check.
+     */
+    const kept = this.metadata?.listRecord;
+    const listRecord =
+      kept?.name === current.name
+        ? kept
+        : this.json(
+            await this.request({ endpoint: 'releaseList' }, op),
+            z.array(releaseRecordSchema),
+          ).find((record) => record.name === current.name);
     const metadata = {
-      release: normalizeRelease(
-        current,
-        records.find((record) => record.name === current.name),
-        body.source.retrievedAt,
-      ),
+      release: normalizeRelease(current, listRecord, body.source.retrievedAt),
+      listRecord,
       source: body.source,
       fetchedAt: Date.parse(body.source.retrievedAt),
       sequence,
