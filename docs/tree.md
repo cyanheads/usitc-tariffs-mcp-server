@@ -1,6 +1,6 @@
 # usitc-tariffs-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 03:42:24
+Generated on: 2026-11-16 01:50:37
 
 ```text
 usitc-tariffs-mcp-server/
@@ -25,6 +25,7 @@ usitc-tariffs-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -134,7 +135,11 @@ usitc-tariffs-mcp-server/
 │   ├── list-skills.ts
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
-│   └── tree.ts
+│   ├── tree.ts
+│   └── verify-general-note-3.ts
+├── skills/
+│   └── usitc-tariffs-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── mcp-server/
 │   │   ├── prompts/
@@ -173,8 +178,9 @@ usitc-tariffs-mcp-server/
 │   ├── fixtures/
 │   │   ├── chapter99/
 │   │   │   └── official-structure.ts
-│   │   └── tariffs/
-│   │       └── base-rows.ts
+│   │   ├── tariffs/
+│   │   │   └── base-rows.ts
+│   │   └── tool-harness.ts
 │   ├── fuzz/
 │   ├── integration/
 │   ├── mcp-server/
@@ -185,11 +191,13 @@ usitc-tariffs-mcp-server/
 │   ├── prompts/
 │   ├── resources/
 │   ├── scripts/
-│   │   └── clean-mcpb.test.ts
+│   │   ├── clean-mcpb.test.ts
+│   │   └── verify-general-note-3.test.ts
 │   ├── services/
 │   │   ├── chapter99/
 │   │   │   └── chapter99-index.test.ts
 │   │   ├── reference/
+│   │   │   ├── input-patterns.test.ts
 │   │   │   └── reference-service.test.ts
 │   │   ├── tariffs/
 │   │   │   ├── heading-tree.test.ts
@@ -197,6 +205,8 @@ usitc-tariffs-mcp-server/
 │   │   │   └── reply-node.test.ts
 │   │   └── usitc/
 │   │       └── usitc-service.test.ts
+│   ├── skills/
+│   │   └── published-skills.test.ts
 │   ├── smoke/
 │   └── tools/
 ├── .dockerignore
@@ -209,6 +219,7 @@ usitc-tariffs-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
