@@ -24,6 +24,7 @@ await createApp({
     checkAdditionalDutiesTool,
     listReferenceTool,
   ],
+  skills: 'skills',
   setup() {
     initUsitcService();
   },
